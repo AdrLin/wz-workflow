@@ -20,7 +20,7 @@ class ModelDownloader:
     MODELS = {
         "ultimate_building_classifier_svm_0.957_20250911_114900.pkl": {
             "url": GITHUB_RELEASE_URL + "ultimate_building_classifier_svm_0.957_20250911_114900.pkl",
-            "size_mb": None,  # nieznany rozmiar
+            "size_mb": 173,  
             "description": "Model klasyfikacji budynków (SVM)"
         }
     }
