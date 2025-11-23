@@ -15,23 +15,13 @@ class ModelDownloader:
     """Zarządza pobieraniem dużych plików modeli"""
     
     # Konfiguracja - ZAKTUALIZUJ PO UTWORZENIU RELEASE
-    GITHUB_RELEASE_URL = "https://github.com/TwojeRepo/wz-workflow/releases/download/v1.0.0/"
+    GITHUB_RELEASE_URL = "https://github.com/AdrLin/wz-workflow/releases/download/v1.0.0/"
     
     MODELS = {
-        "best_hex_model.pth": {
-            "url": GITHUB_RELEASE_URL + "best_hex_model.pth",
-            "size_mb": 173,
-            "description": "Model klasyfikacji terenu (PyTorch)"
-        },
         "ultimate_building_classifier_svm_0.957_20250911_114900.pkl": {
-            "url": GITHUB_RELEASE_URL + "ultimate_building_classifier_svm.pkl",
+            "url": GITHUB_RELEASE_URL + "ultimate_building_classifier_svm_0.957_20250911_114900.pkl",
             "size_mb": None,  # nieznany rozmiar
             "description": "Model klasyfikacji budynków (SVM)"
-        },
-        "scaler_hex.pkl": {
-            "url": GITHUB_RELEASE_URL + "scaler_hex.pkl",
-            "size_mb": None,
-            "description": "Scaler dla modelu hex"
         }
     }
     
