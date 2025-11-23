@@ -4,6 +4,7 @@ from qgis.PyQt.QtWidgets import QAction
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtCore import QCoreApplication
 import os
+from .model_downloader import ModelDownloader
 
 class WZWorkflowPlugin:
     def __init__(self, iface):
@@ -11,7 +12,8 @@ class WZWorkflowPlugin:
         self.plugin_dir = os.path.dirname(__file__)
         self.action = None
         self.dock_widget = None  # Przechowuj referencję do dock widget
-        
+        self.model_downloader = ModelDownloader(self.plugin_dir)
+
     def tr(self, message):
         return QCoreApplication.translate('WZWorkflow', message)
 
@@ -88,6 +90,23 @@ class WZWorkflowPlugin:
                 )
                 return
             
+            # DODAJ TUTAJ - sprawdź modele
+            all_present, missing = self.model_downloader.check_models()
+        
+            if not all_present:
+                # Pobierz z dialogiem i progressbarem
+                success = self.model_downloader.download_all_missing(self.iface.mainWindow())
+                
+                if not success:
+                    self.iface.messageBar().pushMessage(
+                        "Błąd", 
+                        "Nie udało się pobrać modeli ML. Wtyczka może nie działać poprawnie.", 
+                        level=2,
+                        duration=5
+                    )
+                    # Można dodać return żeby nie kontynuować, lub pozwolić kontynuować
+                    return
+
             # Import głównego modułu
             try:
                 from .improved_wz_workflow import create_wz_workflow_dock
