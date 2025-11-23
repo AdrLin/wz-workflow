@@ -1,11 +1,7 @@
 # ============================================
 # DUŻE PLIKI MODELI ML - DO GITHUB RELEASES!
 # ============================================
-*.pth
-*.pkl
-best_hex_model.pth
 ultimate_building_classifier_svm_*.pkl
-scaler_hex.pkl
 symbology-style.db
 
 # ============================================
