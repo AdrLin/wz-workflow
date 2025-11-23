@@ -1,0 +1,25 @@
+[general]
+name=WZ Workflow
+qgisMinimumVersion=3.0
+description=Narzędzie do analizy warunków zabudowy
+version=1.0.0
+author=Adrian Linkowski
+email=link.mapy@gmail.com
+
+about=Kompleksowe narzędzie do analizy warunków zabudowy (WZ) w Polsce. 
+    Automatyzuje proces analizy urbanistycznej z wykorzystaniem danych przestrzennych.
+
+
+tracker=https://github.com/AdrLin/wz-workflow/issues
+repository=https://github.com/AdrLin/wz-workflow
+
+tags=python,urban planning,polska,cadastral,analysis,building
+
+category=Vector
+icon=icon.png
+
+experimental=False
+deprecated=False
+
+# Ważne dla instalacji modelu:
+hasProcessingProvider=no
