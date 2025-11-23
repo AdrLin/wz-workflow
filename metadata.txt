@@ -27,6 +27,7 @@ about=Advanced QGIS plugin for automated urban planning analysis in Poland (Waru
 
 tracker=https://github.com/AdrLin/wz-workflow/issues
 repository=https://github.com/AdrLin/wz-workflow
+homepage=https://github.com/AdrLin/wz-workflow
 
 tags=python,urban planning,poland,cadastral,analysis,building,machine learning,lidar,permits
 
