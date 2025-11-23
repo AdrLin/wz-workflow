@@ -1,19 +1,34 @@
 [general]
 name=WZ Workflow
 qgisMinimumVersion=3.0
-description=Narzędzie do analizy warunków zabudowy
+qgisMaximumVersion=3.99
+description=Comprehensive tool for Polish urban planning analysis (Building Permit Conditions - Warunki Zabudowy)
 version=1.0.0
 author=Adrian Linkowski
 email=link.mapy@gmail.com
 
-about=Kompleksowe narzędzie do analizy warunków zabudowy (WZ) w Polsce. 
-    Automatyzuje proces analizy urbanistycznej z wykorzystaniem danych przestrzennych.
-
+about=Advanced QGIS plugin for automated urban planning analysis in Poland (Warunki Zabudowy - WZ).
+    
+    Features:
+    • 14-step automated workflow for building permit analysis
+    • Machine learning-based terrain and building classification
+    • LiDAR point cloud processing
+    • Cadastral data integration (ULDK/BDOT)
+    • Automated Word report generation
+    • Urban planning indicators (WPZ, WIZ, WPBC)
+    
+    ML models (~174 MB) are downloaded automatically on first use from GitHub.
+    
+    ---
+    
+    Kompleksowe narzędzie do automatycznej analizy warunków zabudowy w Polsce.
+    Automatyzuje 14-stopniowy proces analizy urbanistycznej z wykorzystaniem uczenia maszynowego.
+    Modele ML (~174 MB) są pobierane automatycznie przy pierwszym uruchomieniu.
 
 tracker=https://github.com/AdrLin/wz-workflow/issues
 repository=https://github.com/AdrLin/wz-workflow
 
-tags=python,urban planning,polska,cadastral,analysis,building
+tags=python,urban planning,poland,cadastral,analysis,building,machine learning,lidar,permits
 
 category=Vector
 icon=icon.png
@@ -21,5 +36,14 @@ icon=icon.png
 experimental=False
 deprecated=False
 
-# Ważne dla instalacji modelu:
+changelog=1.0.0
+    - Initial public release
+    - Full 14-step WZ analysis workflow
+    - Automatic ML model download (~174 MB)
+    - Terrain classification (flat/gable/hip/shed roof)
+    - Building classification with SVM
+    - Point cloud processing (LiDAR)
+    - Automated Word report generation
+    - Urban planning indicators calculation
+
 hasProcessingProvider=no
