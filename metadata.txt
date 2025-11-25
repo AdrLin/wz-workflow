@@ -37,11 +37,10 @@ icon=icon.png
 experimental=False
 deprecated=False
 changelog=1.0.1
-    - Dodano automatyczne pobieranie nazwy gminy z warstwy granica_terenu
-    - Placeholder {{nazwa_gminy}} dostępny w szablonach Word
-    - Zaktualizowane szablony raportów Word
-    - Poprawione formatowanie dokumentów
-1.0.0
+    - Added automatic municipality name extraction from granica_terenu layer
+    - {{nazwa_gminy}} placeholder available in Word templates
+    - Updated Word report templates
+    1.0.0
     - Initial public release
     - Full 14-step WZ analysis workflow
     - Automatic ML model download (~174 MB)
