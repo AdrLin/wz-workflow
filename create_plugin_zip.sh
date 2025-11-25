@@ -29,7 +29,7 @@ fi
 echo -e "Wersja: ${GREEN}$VERSION${NC}"
 
 # Nazwa wtyczki (katalog)
-PLUGIN_NAME="wz_workflow" 
+PLUGIN_NAME=$(basename "$PWD") 
 OUTPUT_ZIP="${PLUGIN_NAME}-${VERSION}.zip"
 
 # Przejdź do katalogu nadrzędnego
@@ -44,11 +44,13 @@ zip -r "$OUTPUT_ZIP" "$PLUGIN_NAME/" \
     -x "*.pyc" \
     -x "*.pyo" \
     -x ".git/*" \
+    -x "*.backup"\
     -x ".gitignore" \
     -x ".vscode/*" \
     -x ".idea/*" \
     -x "ml_dataset/*" \
     -x "workflow_checkpoint.json" \
+    -x "*.zip"\
     -x "*.qgs~" \
     -x "*.qgz~" \
     -x "*.log" \
