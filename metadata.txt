@@ -3,7 +3,7 @@ name=WZ Workflow
 qgisMinimumVersion=3.0
 qgisMaximumVersion=3.99
 description=Comprehensive tool for Polish urban planning analysis (Building Permit Conditions - Warunki Zabudowy)
-version=1.0.1
+version=1.0.2
 author=Adrian Linkowski
 email=link.mapy@gmail.com
 
@@ -36,7 +36,9 @@ icon=icon.png
 
 experimental=False
 deprecated=False
-changelog=1.0.1
+changelog=1.0.2
+    - Fixed plugin packaging (removed large files from ZIP)
+    1.0.1
     - Added automatic municipality name extraction from granica_terenu layer
     - {{nazwa_gminy}} placeholder available in Word templates
     - Updated Word report templates
