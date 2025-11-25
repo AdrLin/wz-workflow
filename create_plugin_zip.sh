@@ -29,7 +29,7 @@ fi
 echo -e "Wersja: ${GREEN}$VERSION${NC}"
 
 # Nazwa wtyczki (katalog)
-PLUGIN_NAME=$(basename "$PWD")
+PLUGIN_NAME="wz_workflow" 
 OUTPUT_ZIP="${PLUGIN_NAME}-${VERSION}.zip"
 
 # Przejdź do katalogu nadrzędnego
