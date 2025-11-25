@@ -34,13 +34,11 @@ OUTPUT_ZIP="${PLUGIN_NAME}-${VERSION}.zip"
 
 # Przejdź do katalogu nadrzędnego
 cd ..
-
 echo -e "\n${YELLOW}Pakowanie...${NC}"
 
 # Pakuj z wykluczeniem dużych plików i śmieci
 zip -r "$OUTPUT_ZIP" "$PLUGIN_NAME/" \
-    -x "*.pth" \
-    -x "*.pkl" \
+    -x "*ultimate_building_classifier_svm*.pkl" \
     -x "symbology-style.db" \
     -x "*/__pycache__/*" \
     -x "*.pyc" \
