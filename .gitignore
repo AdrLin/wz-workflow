@@ -86,3 +86,4 @@ temp/
 # DOKUMENTACJA (opcjonalnie - możesz commitować)
 # ============================================
 # docs/_build/
+*.backup
