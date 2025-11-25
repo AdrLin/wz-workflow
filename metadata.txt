@@ -3,7 +3,7 @@ name=WZ Workflow
 qgisMinimumVersion=3.0
 qgisMaximumVersion=3.99
 description=Comprehensive tool for Polish urban planning analysis (Building Permit Conditions - Warunki Zabudowy)
-version=1.0.0
+version=1.0.1
 author=Adrian Linkowski
 email=link.mapy@gmail.com
 
@@ -36,8 +36,12 @@ icon=icon.png
 
 experimental=False
 deprecated=False
-
-changelog=1.0.0
+changelog=1.0.1
+    - Dodano automatyczne pobieranie nazwy gminy z warstwy granica_terenu
+    - Placeholder {{nazwa_gminy}} dostępny w szablonach Word
+    - Zaktualizowane szablony raportów Word
+    - Poprawione formatowanie dokumentów
+1.0.0
     - Initial public release
     - Full 14-step WZ analysis workflow
     - Automatic ML model download (~174 MB)

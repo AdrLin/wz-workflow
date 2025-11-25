@@ -494,13 +494,6 @@ class ModernButton(QPushButton):
 
 
 
-"""
-GOTOWY SNIPPET DO WKLEJENIA
-============================
-Wklej ten kod PRZED klasą LayerSelectionDialog w Twoim głównym skrypcie.
-Następnie wykonaj zmiany opisane na końcu tego pliku.
-"""
-
 # ==================== WALIDACJA I MAPOWANIE PÓL - NOWE FUNKCJE ====================
 
 class FieldMappingDialog(QDialog):
@@ -586,6 +579,7 @@ class FieldMappingDialog(QDialog):
         layout.addWidget(button_box)
         
         self.setLayout(layout)
+    
     
     def find_best_match(self, required_field, available_fields):
         """Znajdź najlepsze dopasowanie pola"""
@@ -1134,24 +1128,6 @@ def copy_and_save_base_layers_v2():
         return False, error_msg
 
 
-"""
-================================================================================
-DODATKOWO - WYKONAJ TE ZMIANY W ISTNIEJĄCYM KODZIE:
-================================================================================
-
-1. W WORKFLOW_STEPS krok 0 - zmień:
-   'custom_function': 'copy_and_save_base_layers'
-   NA:
-   'custom_function': 'copy_and_save_base_layers_v2'
-
-2. W metodzie execute_layer_selection() - zmień:
-   success, message = copy_and_save_base_layers()
-   NA:
-   success, message = copy_and_save_base_layers_v2()
-
-GOTOWE!
-================================================================================
-"""
 
 class LayerSelectionDialog(QDialog):
     """Dialog do wyboru warstw działek i budynków"""
@@ -1724,6 +1700,29 @@ class DaneDzialkiDialog(QDialog):
                 print(f"⚠️ Nie znaleziono pola powierzchni w warstwie '{layer_name}'")
         else:
             print(f"ℹ️ Powierzchnia wczytana z pliku: {self.data.get('powierzchnia_dzialki')} m²")
+            
+            
+            # ===== POBIERZ NAZWĘ GMINY =====
+        nazwa_gminy_fields = [
+            'gmina', 'GMINA', 'NAZWA_GMINY', 'nazwa_gminy', 
+            'gmina_nazwa', 'GMINA_NAZWA', 'miejscowosc'
+        ]
+        
+        nazwa_gminy_value = None
+        if not data_from_file or not self.data.get('nazwa_gminy'):
+            for field_name in nazwa_gminy_fields:
+                matching_field = next((f for f in field_names if f.lower() == field_name.lower()), None)
+                if matching_field:
+                    nazwa_gminy_value = feature[matching_field]
+                    if nazwa_gminy_value:
+                        print(f"✅ Pobrano nazwę gminy z pola '{matching_field}': {nazwa_gminy_value}")
+                        self.data['nazwa_gminy'] = str(nazwa_gminy_value)
+                        break
+            
+            if not nazwa_gminy_value:
+                print(f"⚠️ Nie znaleziono pola nazwy gminy w warstwie '{layer_name}'")
+        else:
+            print(f"ℹ️ Nazwa gminy wczytana z pliku: {self.data.get('nazwa_gminy')}")
         
         # ===== POBIERZ WSKAŹNIKI ISTNIEJĄCEJ ZABUDOWY (POJEDYNCZE WARTOŚCI!) =====
         wskazniki = {}
@@ -2491,6 +2490,7 @@ class DaneDzialkiDialog(QDialog):
                 dane_arkusz.append(['z dnia', self.data.get('data_wniosku', ''), '', '', '', '', ''])
                 dane_arkusz.append(['Adres', self.data.get('adres_dzialki', ''), '', '', '', '', ''])
                 dane_arkusz.append(['identyfikator działki', self.data.get('identyfikator_dzialki', ''), '', '', '', '', ''])
+                dane_arkusz.append(['gmina', self.data.get('nazwa_gminy', ''), '', '', '', '', ''])
                 dane_arkusz.append(['Nazwa inwestycji', self.data.get('Nazwa_inwestycji', ''), '', '', '', '', ''])
                 dane_arkusz.append(['Rodzaj zabudowy', self.data.get('Rodzaj_zabudowy', ''), '', '', '', '', ''])
                 dane_arkusz.append(['teren obecnie:', self.data.get('obecne_zagospodarowanie', ''), '', '', '', '', ''])
@@ -2564,6 +2564,7 @@ class DaneDzialkiDialog(QDialog):
                 eksport_data.append(['data_wniosku', self.data.get('data_wniosku', '')])
                 eksport_data.append(['adres_dzialki', self.data.get('adres_dzialki', '')])
                 eksport_data.append(['identyfikator_dzialki', self.data.get('identyfikator_dzialki', '')])
+                eksport_data.append(['nazwa_gminy', self.data.get('nazwa_gminy', '')])
                 eksport_data.append(['Nazwa_inwestycji', self.data.get('Nazwa_inwestycji', '')])
                 eksport_data.append(['Rodzaj_zabudowy', self.data.get('Rodzaj_zabudowy', '')])
                 eksport_data.append(['obecne_zagospodarowanie', self.data.get('obecne_zagospodarowanie', '')])

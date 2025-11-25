@@ -44,8 +44,6 @@ workflow_checkpoint.json
 # DANE I WYNIKI (nie commitować)
 # ============================================
 ml_dataset/
-output_and_results_unified.py
-analizaWZ_szablony/*.docx~
 
 # ============================================
 # IDE i EDYTORY
