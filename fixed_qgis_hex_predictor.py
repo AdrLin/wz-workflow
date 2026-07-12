@@ -5,15 +5,13 @@ import pandas as pd
 import numpy as np
 import processing
 import os
-from qgis.core import (QgsProject, QgsField, QgsVectorLayer)
+from qgis.core import (QgsProject, QgsField, QgsVectorLayer, QgsFields, QgsPointXY, QgsFeature, QgsGeometry)
 from PyQt5.QtCore import QVariant
 import warnings
 warnings.filterwarnings('ignore')
-import torch
-import torch.nn as nn
-import pickle
+import joblib
 import math
-from collections import defaultdict
+from qgis.core import QgsVectorFileWriter, QgsCoordinateTransformContext
 
 # Wyłącz ostrzeżenia XCB
 os.environ['QT_LOGGING_RULES'] = 'qt.qpa.xcb.warning=false'
@@ -29,37 +27,97 @@ project_crs = project.crs()
 project_path = QgsProject.instance().fileName()
 project_directory = os.path.dirname(project_path)
 
-torch.set_num_threads(4)
 
-# === Parametry modelu ===
-INPUT_FEATURES = ['Z', 'Intensity', 'ReturnNumber', 'NumberOfReturns', 'Red', 'Green', 'Blue']
-MODEL_PATH = os.path.join(SCRIPTS_PATH, "best_hex_model.pth")
-SCALER_PATH = os.path.join(SCRIPTS_PATH, "scaler_hex.pkl")
-HEX_SIZE = 1.0
+# ── Nowy model Random Forest (bundle z joblib) ──
+# Bundle to słownik zapisany przez pbc_train_rf.py:
+#   {'model', 'feature_order', 'class_names', 'pbc_classes', 'hex_size'}
+MODEL_PATH = os.path.join(SCRIPTS_PATH, "rf_pbc_ostrow.pkl")
+HEX_SIZE = 0.36
+
+# ⚠️ Promień sąsiedztwa dla cech geometrycznych — MUSI być identyczny jak w treningu!
+# Maska cięcia jest o tyle buforowana, żeby heksagony przy granicy działki
+# miały PEŁNE otoczenie (inaczej cecha liczyłaby się inaczej niż w treningu).
+NEIGHBOR_RADIUS = 1.5
+MIN_NEIGHBORS   = 8
+
+# ⚠️ PRÓG DECYZYJNY PBC
+# Heksagon jest uznany za PBC tylko gdy P(PBC) > PBC_THRESHOLD, gdzie
+#   P(PBC) = suma prawdopodobieństw klas PBC {0,1,2,3,4,11,12}
+#
+# 0.50 → zachowanie symetryczne (jak argmax) — model nieobciążony
+# 0.60 → model musi być pewniejszy, by uznać coś za PBC; wątpliwe idą
+#        do nie-PBC → wskaźnik NIŻSZY
+#
+# KIERUNEK (wskaźnik liczony z działek SĄSIEDNICH = wymóg dla inwestora):
+#   zawyżony PBC → ostrzejszy wymóg → inwestor może nie zbudować  ← unikamy
+#   zaniżony PBC → łagodniejszy wymóg → inwestor dostaje zgodę    ← akceptowalne
+# Podnoszenie progu przesuwa błąd w stronę zaniżania.
+#
+# Dobierz wartość skryptem pbc_threshold_sweep.py — pokaże, ile
+# zawyżania kupujesz za ile zaniżania.
+#
+# UWAGA: to NIE to samo co kolumna `confidence` (max proba po 13 klasach).
+# Heksagon może mieć confidence=0.35 (model waha się trawnik/ruderalna/pole),
+# ale P(PBC)=0.85, bo wszystkie te klasy są PBC.
+PBC_THRESHOLD = 0.65
+
+# Klasy PBC (biologicznie czynne) — do sumowania prawdopodobieństwa
+PBC_CLASSES = {0, 1, 2, 3, 4, 11, 12}
+
+# Kolumny wejściowe potrzebne do policzenia cech (nazwy atrybutów w warstwie punktów)
+INPUT_FEATURES = ['Red', 'Green', 'Blue', 'Z', 'Intensity', 'ReturnNumber', 'NumberOfReturns']
+
+# 14 klas → PBC (0) / nie-PBC (1). PBC = biologicznie czynne.
+# Zgodne z bundlem: PBC_CLASSES = {0,1,2,3,4,11,12}
+MULTICLASS_TO_BINARY = {
+    0: 0,   # Trawnik zadbany       → PBC
+    1: 0,   # Roślinność ruderalna  → PBC
+    2: 0,   # Pole uprawne          → PBC
+    3: 0,   # Zaorane pole          → PBC
+    4: 0,   # Droga gruntowa        → PBC
+    5: 1,   # Asfalt                → nie-PBC
+    6: 1,   # Beton                 → nie-PBC
+    7: 1,   # Kostka czerwona       → nie-PBC
+    8: 1,   # Kostka niebieska      → nie-PBC
+    9: 1,   # Kort tenisowy         → nie-PBC
+    10: 1,  # Beton cień            → nie-PBC
+    11: 0,  # Trawa cień            → PBC
+    12: 0,  # Gleba cień            → PBC
+    13: 1,  # Boisko                → nie-PBC
+}
+
+CLASS_NAMES = {
+    0: "Trawnik zadbany", 1: "Roślinność ruderalna", 2: "Pole uprawne",
+    3: "Zaorane pole", 4: "Droga gruntowa", 5: "Asfalt", 6: "Beton",
+    7: "Kostka czerwona", 8: "Kostka niebieska", 9: "Kort tenisowy",
+    10: "Beton cień", 11: "Trawa cień", 12: "Gleba cień", 13: "Boisko",
+}
+
+# Kolejność cech — MUSI być identyczna jak w treningu (pbc_train_rf.py / v3).
+FEATURE_ORDER = [
+    'mean_chroma_r', 'std_chroma_r',
+    'mean_chroma_g', 'std_chroma_g',
+    'mean_chroma_b', 'std_chroma_b',
+    'mean_gri', 'std_gri',
+    'mean_gbi', 'std_gbi',
+    'mean_rbi', 'std_rbi',
+    'cv_R', 'cv_G', 'cv_B',
+    'mean_brightness', 'std_brightness', 'cv_brightness',
+    'mean_I', 'std_I', 'cv_I',
+    'std_Z', 'mean_return_ratio',
+    # cechy sąsiedztwa (v4) — dają modelowi GEOMETRIĘ, która rozdziela
+    # gładki beton od chropowatej drogi gruntowej
+    'nb_planarity', 'nb_std_Z', 'nb_std_I', 'nb_std_brightness', 'nb_I_contrast',
+]
 
 
 # === Model heksagonalny ===
-class HexTerrainNet(nn.Module):
-    def __init__(self, input_dim, hidden_dim=128, output_dim=5):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.BatchNorm1d(hidden_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(hidden_dim // 2, hidden_dim // 4),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim // 4, output_dim)
-        )
-    
-    def forward(self, x):
-        return self.net(x)
 
+def axial_to_cartesian(q, r, hex_size):
+    """Flat-top: axial (q, r) → współrzędne kartezjańskie centroidu."""
+    x = hex_size * 1.5 * q
+    y = hex_size * (math.sqrt(3)/2 * q + math.sqrt(3) * r)
+    return x, y
 
 def hex_grid_coordinates(x, y, hex_size):
     q = (2/3 * x) / hex_size
@@ -78,116 +136,225 @@ def hex_grid_coordinates(x, y, hex_size):
 
 
 def create_hexagon_features(points_data):
-    hex_groups = defaultdict(list)
-    print("Grupowanie punktów w heksagony...")
-    for idx, row in points_data.iterrows():
-        hex_coord = hex_grid_coordinates(row['X'], row['Y'], HEX_SIZE)
-        hex_groups[hex_coord].append(row)
-    print(f"Utworzono {len(hex_groups)} heksagonów z {len(points_data)} punktów")
-    
-    hex_features = []
-    hex_coords = []
-    
-    for hex_coord, points in hex_groups.items():
-        if len(points) < 3:
+    """
+    Liczy 23 CECHY ODPORNE — IDENTYCZNIE jak w treningu (pbc_extract_features_v3).
+    Chromatyczność, indeksy ratio, cv barw, jasność, surowa intensywność,
+    std_Z, return ratio. Bez normalizacji per-kafel (spójne z modelem Ostrowa).
+    """
+    print("Grupowanie punktów w heksagony (wektoryzowane)...")
+
+    # Współrzędne z GEOMETRII (geom_x/geom_y) — CRS geometrii, nie atrybutów X/Y
+    if 'geom_x' in points_data.columns and 'geom_y' in points_data.columns:
+        X = points_data['geom_x'].values
+        Y = points_data['geom_y'].values
+    else:
+        X = points_data['X'].values
+        Y = points_data['Y'].values
+
+    h = HEX_SIZE
+    eps = 1e-8
+
+    # Przypisanie punktów do heksagonów (cube rounding)
+    q_f = (2/3 * X) / h
+    r_f = (-1/3 * X + math.sqrt(3)/3 * Y) / h
+    q_r = np.round(q_f).astype(int)
+    r_r = np.round(r_f).astype(int)
+    s_r = np.round(-q_f - r_f).astype(int)
+    q_diff = np.abs(q_r - q_f)
+    r_diff = np.abs(r_r - r_f)
+    s_diff = np.abs(s_r - (-q_f - r_f))
+    mask_q = (q_diff > r_diff) & (q_diff > s_diff)
+    q_r[mask_q] = -r_r[mask_q] - s_r[mask_q]
+    mask_r = (~mask_q) & (r_diff > s_diff)
+    r_r[mask_r] = -q_r[mask_r] - s_r[mask_r]
+
+    d = points_data.copy()
+    d['hex_q'] = q_r
+    d['hex_r'] = r_r
+
+    R = d['Red'].astype(float)
+    G = d['Green'].astype(float)
+    B = d['Blue'].astype(float)
+
+    # --- Cechy per-punkt liczone PRZED grupowaniem (wektoryzowane) ---
+    total = R + G + B + eps
+    d['chroma_r'] = R / total
+    d['chroma_g'] = G / total
+    d['chroma_b'] = B / total
+    d['gri'] = (G - R) / (G + R + eps)
+    d['gbi'] = (G - B) / (G + B + eps)
+    d['rbi'] = (R - B) / (R + B + eps)
+    d['brightness'] = (R + G + B) / 3.0
+    d['return_ratio'] = d['ReturnNumber'] / (d['NumberOfReturns'] + eps)
+
+    grouped = d.groupby(['hex_q', 'hex_r'])
+
+    # Agregacja (bez filtrowania — w produkcji KAŻDY heksagon dostaje predykcję)
+    agg = grouped.agg(
+        mean_chroma_r=('chroma_r', 'mean'), std_chroma_r=('chroma_r', 'std'),
+        mean_chroma_g=('chroma_g', 'mean'), std_chroma_g=('chroma_g', 'std'),
+        mean_chroma_b=('chroma_b', 'mean'), std_chroma_b=('chroma_b', 'std'),
+        mean_gri=('gri', 'mean'), std_gri=('gri', 'std'),
+        mean_gbi=('gbi', 'mean'), std_gbi=('gbi', 'std'),
+        mean_rbi=('rbi', 'mean'), std_rbi=('rbi', 'std'),
+        mean_R=('Red', 'mean'), std_R=('Red', 'std'),
+        mean_G=('Green', 'mean'), std_G=('Green', 'std'),
+        mean_B=('Blue', 'mean'), std_B=('Blue', 'std'),
+        mean_brightness=('brightness', 'mean'), std_brightness=('brightness', 'std'),
+        mean_I=('Intensity', 'mean'), std_I=('Intensity', 'std'),
+        std_Z=('Z', 'std'),
+        mean_return_ratio=('return_ratio', 'mean'),
+    )
+    agg = agg.fillna(0)  # std z 1 punktu → NaN → 0
+
+    # Współczynniki zmienności (bezwymiarowe)
+    agg['cv_R'] = agg['std_R'] / (agg['mean_R'] + eps)
+    agg['cv_G'] = agg['std_G'] / (agg['mean_G'] + eps)
+    agg['cv_B'] = agg['std_B'] / (agg['mean_B'] + eps)
+    agg['cv_brightness'] = agg['std_brightness'] / (agg['mean_brightness'] + eps)
+    agg['cv_I'] = agg['std_I'] / (agg['mean_I'] + eps)
+
+    hex_features_df = agg[[
+        'mean_chroma_r', 'std_chroma_r', 'mean_chroma_g', 'std_chroma_g',
+        'mean_chroma_b', 'std_chroma_b', 'mean_gri', 'std_gri',
+        'mean_gbi', 'std_gbi', 'mean_rbi', 'std_rbi',
+        'cv_R', 'cv_G', 'cv_B',
+        'mean_brightness', 'std_brightness', 'cv_brightness',
+        'mean_I', 'std_I', 'cv_I', 'std_Z', 'mean_return_ratio',
+    ]].copy()
+
+    # ========================================================
+    # CECHY SĄSIEDZTWA (v4) — liczone z PEŁNEJ chmury w promieniu
+    # NEIGHBOR_RADIUS. To one dają modelowi geometrię: gładki beton
+    # vs chropowata droga gruntowa.
+    # ========================================================
+    from scipy.spatial import cKDTree
+
+    hex_coords = [tuple(i) for i in agg.index]
+    centroids = np.array([axial_to_cartesian(q, r, HEX_SIZE) for q, r in hex_coords])
+
+    print(f"   Buduję KDTree ({len(X):,} punktów), promień {NEIGHBOR_RADIUS} m...")
+    tree = cKDTree(np.column_stack([X, Y]))
+
+    Zc  = d['Z'].values.astype(float)
+    Ic  = d['Intensity'].values.astype(float)
+    Brc = d['brightness'].values.astype(float)
+
+    n_hex = len(centroids)
+    planarity = np.zeros(n_hex)
+    nb_std_Z  = np.zeros(n_hex)
+    nb_std_I  = np.zeros(n_hex)
+    nb_std_br = np.zeros(n_hex)
+    nb_contr  = np.ones(n_hex)
+
+    hex_mean_I = agg['mean_I'].values
+    neighbor_idx = tree.query_ball_point(centroids, r=NEIGHBOR_RADIUS, workers=-1)
+
+    for i, idxs in enumerate(neighbor_idx):
+        if len(idxs) < MIN_NEIGHBORS:
             continue
-        points_df = pd.DataFrame(points)
-        features = []
-        
-        for feature in INPUT_FEATURES:
-            values = points_df[feature].values
-            if len(values) > 0:
-                features.extend([
-                    np.mean(values), np.std(values) if len(values) > 1 else 0.0,
-                    np.min(values), np.max(values),
-                    np.percentile(values, 25), np.percentile(values, 75),
-                ])
-            else:
-                features.extend([0.0] * 6)
-        
-        features.extend([
-            len(points),
-            points_df['Z'].max() - points_df['Z'].min(),
-            np.std(points_df['Z']),
-        ])
-        
-        if 'ReturnNumber' in points_df.columns and 'NumberOfReturns' in points_df.columns:
-            first_returns = (points_df['ReturnNumber'] == 1).sum()
-            features.append(first_returns / len(points))
-            last_returns = (points_df['ReturnNumber'] == points_df['NumberOfReturns']).sum()
-            features.append(last_returns / len(points))
-            features.append(points_df['NumberOfReturns'].mean())
-        
-        if all(col in points_df.columns for col in ['Red', 'Green', 'Blue']):
-            ndvi_like = (points_df['Green'] - points_df['Red']) / (points_df['Green'] + points_df['Red'] + 1e-8)
-            features.extend([np.mean(ndvi_like), np.std(ndvi_like)])
-            brightness = (points_df['Red'] + points_df['Green'] + points_df['Blue']) / 3
-            features.extend([np.mean(brightness), np.std(brightness)])
-        
-        hex_features.append(features)
-        hex_coords.append(hex_coord)
-    
-    return np.array(hex_features), hex_coords, hex_groups
+        idxs = np.asarray(idxs)
+        nx, ny, nz = X[idxs], Y[idxs], Zc[idxs]
+        nI, nB = Ic[idxs], Brc[idxs]
 
+        # dopasowanie płaszczyzny z = a·x + b·y + c → RMS reszt
+        n = len(nz)
+        x0, y0, z0 = nx.mean(), ny.mean(), nz.mean()
+        A = np.column_stack([nx - x0, ny - y0, np.ones(n)])
+        try:
+            coef, *_ = np.linalg.lstsq(A, nz - z0, rcond=None)
+            resid = (nz - z0) - (A @ coef)
+            planarity[i] = float(np.sqrt(np.mean(resid ** 2)))
+        except Exception:
+            planarity[i] = 0.0
 
-def map_hex_predictions_to_points(hex_predictions, hex_coords, hex_groups, original_points):
-    point_predictions = np.zeros(len(original_points))
-    for hex_coord, prediction in zip(hex_coords, hex_predictions):
-        if hex_coord in hex_groups:
-            for point in hex_groups[hex_coord]:
-                point_idx = point.name if hasattr(point, 'name') else point['original_index']
-                if point_idx < len(point_predictions):
-                    point_predictions[point_idx] = prediction
-    return point_predictions
+        nb_std_Z[i]  = np.std(nz)
+        nb_std_I[i]  = np.std(nI)
+        nb_std_br[i] = np.std(nB)
+        nb_contr[i]  = hex_mean_I[i] / (np.mean(nI) + eps)
 
+    hex_features_df['nb_planarity']      = planarity
+    hex_features_df['nb_std_Z']          = nb_std_Z
+    hex_features_df['nb_std_I']          = nb_std_I
+    hex_features_df['nb_std_brightness'] = nb_std_br
+    hex_features_df['nb_I_contrast']     = nb_contr
+
+    hex_features = hex_features_df[FEATURE_ORDER].values
+
+    print(f"Utworzono {len(hex_coords)} heksagonów z {len(d)} punktów")
+    return hex_features, hex_coords, {}, d
 
 class QGISHexLidarPredictor:
     def __init__(self):
         self.model = None
-        self.scaler = None
         self.hex_size = HEX_SIZE
-        self.input_dim = None
-        
-    def load_model(self, model_path, scaler_path):
+
+    def load_model(self, model_path):
         try:
-            checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
-            self.input_dim = checkpoint.get('input_dim', 52)
-            num_classes = checkpoint.get('num_classes', 5)
-            self.hex_size = checkpoint.get('hex_size', HEX_SIZE)
-            self.model = HexTerrainNet(input_dim=self.input_dim, output_dim=num_classes)
-            self.model.load_state_dict(checkpoint['model_state_dict'])
-            self.model.eval()
-            with open(scaler_path, 'rb') as f:
-                self.scaler = pickle.load(f)
-            print(f"Model załadowany: input_dim={self.input_dim}, output_dim={num_classes}")
+            bundle = joblib.load(model_path)
+            # bundle to słownik z pbc_train_rf.py; obsłuż też goły model
+            if isinstance(bundle, dict) and 'model' in bundle:
+                self.model = bundle['model']
+                saved_order = bundle.get('feature_order')
+                if saved_order and list(saved_order) != FEATURE_ORDER:
+                    print("⚠️ UWAGA: kolejność cech w modelu różni się od FEATURE_ORDER!")
+            else:
+                self.model = bundle
+            print(f"✅ Model Random Forest załadowany z {model_path}")
             return True
         except Exception as e:
             print(f"Błąd ładowania modelu: {e}")
             return False
-    
-    def predict_points(self, points_df):
+
+    def predict_hexagons(self, points_df):
         try:
-            points_df = points_df.copy()
-            points_df['original_index'] = range(len(points_df))
-            X_hex, hex_coords, hex_groups = create_hexagon_features(points_df)
+            X_hex, hex_coords, hex_groups, _ = create_hexagon_features(points_df)
             if len(X_hex) == 0:
                 print("Brak heksagonów do predykcji!")
-                return np.zeros(len(points_df))
-            print(f"Stworzono {len(X_hex)} heksagonów o wymiarach {X_hex.shape}")
-            X_scaled = self.scaler.transform(X_hex)
-            predictions = []
-            with torch.no_grad():
-                for i in range(0, len(X_scaled), 64):
-                    batch = X_scaled[i:i+64]
-                    X_tensor = torch.tensor(batch, dtype=torch.float32)
-                    logits = self.model(X_tensor)
-                    batch_preds = torch.argmax(logits, dim=1).numpy()
-                    predictions.extend(batch_preds)
-            predictions = np.array(predictions)
-            return map_hex_predictions_to_points(predictions, hex_coords, hex_groups, points_df)
+                return pd.DataFrame()
+            print(f"Utworzono {len(X_hex)} heksagonów o wymiarach {X_hex.shape}")
+
+            predictions = self.model.predict(X_hex)
+
+            # --- Prawdopodobieństwa: pewność klasy + P(PBC) ---
+            try:
+                proba = self.model.predict_proba(X_hex)
+                confidence = proba.max(axis=1)
+                # P(PBC) = suma prawdopodobieństw klas biologicznie czynnych
+                pbc_cols = [j for j, c in enumerate(self.model.classes_)
+                            if int(c) in PBC_CLASSES]
+                p_pbc = proba[:, pbc_cols].sum(axis=1)
+            except Exception:
+                confidence = np.ones(len(predictions))
+                p_pbc = np.array([1.0 if MULTICLASS_TO_BINARY.get(int(p), 1) == 0 else 0.0
+                                  for p in predictions])
+
+            hex_df = pd.DataFrame({
+                'hex_q': [c[0] for c in hex_coords],
+                'hex_r': [c[1] for c in hex_coords],
+                'center_x': [axial_to_cartesian(c[0], c[1], HEX_SIZE)[0] for c in hex_coords],
+                'center_y': [axial_to_cartesian(c[0], c[1], HEX_SIZE)[1] for c in hex_coords],
+                'predicted_label_multi': predictions.astype(int),
+                'confidence': np.round(confidence, 3),
+                'p_pbc': np.round(p_pbc, 3),
+            })
+
+            # ⚠️ DECYZJA BINARNA NA PROGU, nie na argmax.
+            # PBC (0) tylko gdy P(PBC) > PBC_THRESHOLD; inaczej nie-PBC (1).
+            hex_df['predicted_label'] = np.where(p_pbc > PBC_THRESHOLD, 0, 1)
+
+            n_flip = int((hex_df['predicted_label'] !=
+                          hex_df['predicted_label_multi'].map(MULTICLASS_TO_BINARY)).sum())
+            if n_flip:
+                print(f"   Próg P(PBC)>{PBC_THRESHOLD}: {n_flip} heksagonów "
+                      f"zmieniło kategorię względem argmax")
+
+            return hex_df
         except Exception as e:
             print(f"Błąd predykcji: {e}")
-            return np.zeros(len(points_df))
+            import traceback
+            traceback.print_exc()
+            return pd.DataFrame()
 
 
 # === Funkcje pomocnicze ===
@@ -215,39 +382,86 @@ def safe_add_layer_to_project(layer, layer_name=None):
 def layer_to_df(layer):
     data = []
     for f in layer.getFeatures():
-        data.append(f.attributes())
-    return pd.DataFrame(data, columns=[field.name() for field in layer.fields()])
+        row = f.attributes()
+        geom = f.geometry()
+        if geom and not geom.isEmpty():
+            pt = geom.asPoint()
+            row.extend([pt.x(), pt.y()])
+        else:
+            row.extend([None, None])
+        data.append(row)
+    cols = [field.name() for field in layer.fields()] + ['geom_x', 'geom_y']
+    return pd.DataFrame(data, columns=cols)
 
-
-def wczytaj_csv_do_qgis(sciezka_csv, nazwa_kolumny_x='X', nazwa_kolumny_y='Y', 
-                        separator=',', crs_kod=None, nazwa_warstwy=None, 
-                        kolumny_int=['predicted_label']):
-    if crs_kod is None:
-        crs_kod = project_crs
-    if not os.path.exists(sciezka_csv):
-        print(f"Błąd: Plik {sciezka_csv} nie istnieje!")
-        return None
-    if nazwa_warstwy is None:
-        nazwa_warstwy = os.path.splitext(os.path.basename(sciezka_csv))[0]
+def wczytaj_heksagony_do_qgis(csv_path, nazwa_warstwy, hex_size=HEX_SIZE, crs=project_crs):
+    """Wczytuje CSV z centroidami heksagonów i tworzy warstwę poligonową."""
+    df = pd.read_csv(csv_path)
     
-    # Konwersja CRS na string
-    if hasattr(crs_kod, 'authid'):
-        crs_string = crs_kod.authid()
+    for lyr in QgsProject.instance().mapLayersByName(nazwa_warstwy):
+        QgsProject.instance().removeMapLayer(lyr.id())
+
+    fields = QgsFields()
+    fields.append(QgsField("hex_q", QVariant.Int))
+    fields.append(QgsField("hex_r", QVariant.Int))
+    fields.append(QgsField("predicted_label", QVariant.Int))
+    fields.append(QgsField("predicted_label_multi", QVariant.Int))
+    fields.append(QgsField("class_name", QVariant.String))
+    fields.append(QgsField("confidence", QVariant.Double))
+    fields.append(QgsField("p_pbc", QVariant.Double))
+
+    CLASS_NAMES_LOCAL = {
+        0: "Trawnik zadbany", 1: "Roślinność ruderalna", 2: "Pole uprawne",
+        3: "Zaorane pole", 4: "Droga gruntowa", 5: "Asfalt", 6: "Beton",
+        7: "Kostka czerwona", 8: "Kostka niebieska", 9: "Kort tenisowy",
+        10: "Beton cień", 11: "Trawa cień", 12: "Gleba cień", 13: "Boisko",
+    }
+
+    layer = QgsVectorLayer("Polygon", nazwa_warstwy, "memory")
+    layer.setCrs(crs)                 # crs to już obiekt QgsCoordinateReferenceSystem
+    provider = layer.dataProvider()
+
+    provider = layer.dataProvider()
+    provider.addAttributes(fields)
+    layer.updateFields()
+
+    features = []
+    for _, row in df.iterrows():
+        cx, cy = float(row['center_x']), float(row['center_y'])
+        pts = []
+        for i in range(6):
+            angle = math.radians(60 * i)
+            pts.append(QgsPointXY(
+                cx + hex_size * math.cos(angle),
+                cy + hex_size * math.sin(angle)
+            ))
+        pts.append(pts[0])
+
+        feat = QgsFeature(fields)
+        feat.setGeometry(QgsGeometry.fromPolygonXY([pts]))
+        feat.setAttribute("hex_q", int(row['hex_q']))
+        feat.setAttribute("hex_r", int(row['hex_r']))
+        feat.setAttribute("predicted_label", int(row['predicted_label']))
+        feat.setAttribute("predicted_label_multi", int(row['predicted_label_multi']))
+        feat.setAttribute("class_name", CLASS_NAMES_LOCAL.get(int(row['predicted_label_multi']), "?"))
+        feat.setAttribute("confidence", float(row['confidence']) if 'confidence' in row else 1.0)
+        feat.setAttribute("p_pbc", float(row['p_pbc']) if 'p_pbc' in row else 0.0)
+        features.append(feat)
+
+    provider.addFeatures(features)
+    layer.updateExtents()
+    safe_add_layer_to_project(layer)
+    # Zapisz do GeoPackage w folderze projektu
+    gpkg_path = os.path.join(project_directory, f"{nazwa_warstwy}.gpkg")
+    error = QgsVectorFileWriter.writeAsVectorFormatV3(
+        layer, gpkg_path, QgsCoordinateTransformContext(),
+        QgsVectorFileWriter.SaveVectorOptions()
+    )
+    if error[0] == QgsVectorFileWriter.NoError:
+        print(f"  💾 Zapisano: {gpkg_path}")
     else:
-        crs_string = str(crs_kod)
-    
-    uri = f"file:///{sciezka_csv}?delimiter={separator}&xField={nazwa_kolumny_x}&yField={nazwa_kolumny_y}&crs={crs_string}&detectTypes=no"
-    warstwa = QgsVectorLayer(uri, nazwa_warstwy, "delimitedtext")
-    
-    if not warstwa.isValid():
-        print(f"Błąd: Nie można wczytać warstwy z pliku {sciezka_csv}")
-        return None
-    
-    safe_add_layer_to_project(warstwa)
-    if kolumny_int:
-        konwertuj_kolumny_na_int(warstwa, kolumny_int)
-    print(f"Wczytano warstwę: {nazwa_warstwy} ({warstwa.featureCount()} obiektów)")
-    return warstwa
+        print(f"  ⚠️ Błąd zapisu GPKG: {error}")
+    print(f"✅ Wczytano {len(features)} heksagonów jako poligony")
+    return layer
 
 
 def konwertuj_kolumny_na_int(warstwa, nazwy_kolumn):
@@ -333,16 +547,39 @@ def diagnose_layers(layer1, layer2):
 
 
 def clip_layer_advanced(punkt_layer, mask_layer, output_name='clipped'):
+    """
+    Przycina punkty do maski POWIĘKSZONEJ o NEIGHBOR_RADIUS.
+
+    ⚠️ DLACZEGO BUFOR: cechy sąsiedztwa (nb_planarity itd.) liczą się z punktów
+    w promieniu NEIGHBOR_RADIUS. Gdyby przyciąć punkty dokładnie do granicy
+    działki, heksagony przy krawędzi miałyby OBCIĘTE otoczenie → inne wartości
+    cech niż w treningu → cichy błąd predykcji. Bufor to naprawia.
+    Heksagony spoza działki są odfiltrowane PO predykcji (filter_hexes_to_mask).
+    """
     print("\n🔧 ROZPOCZYNAM PRZYCINANIE...")
     if not diagnose_layers(punkt_layer, mask_layer):
         return None
-    
+
+    # Powiększ maskę o promień sąsiedztwa
+    try:
+        buf = processing.run("native:buffer", {
+            'INPUT': mask_layer,
+            'DISTANCE': NEIGHBOR_RADIUS,
+            'SEGMENTS': 5,
+            'DISSOLVE': False,
+            'OUTPUT': 'memory:mask_nb_buffered'
+        })['OUTPUT']
+        print(f"   Maska powiększona o {NEIGHBOR_RADIUS} m (dla cech sąsiedztwa)")
+    except Exception as e:
+        print(f"   ⚠️ Nie udało się buforować maski: {e} — używam oryginalnej")
+        buf = mask_layer
+
     # Metoda 1: Extract by location
     try:
         parametry = {
             'INPUT': punkt_layer,
             'PREDICATE': [0],
-            'INTERSECT': mask_layer,
+            'INTERSECT': buf,
             'OUTPUT': f'memory:{output_name}'
         }
         wynik = processing.run("native:extractbylocation", parametry)
@@ -353,12 +590,12 @@ def clip_layer_advanced(punkt_layer, mask_layer, output_name='clipped'):
             return warstwa_wynik
     except Exception as e:
         print(f"❌ Błąd: {e}")
-    
-    # Metoda 2: Z buforem
+
+    # Metoda 2: Z dodatkowym buforem
     try:
         parametry_buffer = {
             'INPUT': mask_layer,
-            'DISTANCE': 1,
+            'DISTANCE': NEIGHBOR_RADIUS + 1,
             'OUTPUT': 'memory:mask_buffered'
         }
         wynik_buffer = processing.run("native:buffer", parametry_buffer)
@@ -377,9 +614,43 @@ def clip_layer_advanced(punkt_layer, mask_layer, output_name='clipped'):
             return warstwa_wynik
     except Exception as e:
         print(f"❌ Błąd z buforem: {e}")
-    
+
     print("❌ Wszystkie metody zawiodły")
     return None
+
+
+def filter_hexes_to_mask(hex_df, mask_layer):
+    """
+    Zostawia tylko heksagony, których centroid leży wewnątrz maski (działki).
+    Potrzebne, bo punkty przycinamy do maski POWIĘKSZONEJ o NEIGHBOR_RADIUS —
+    heksagony z tego bufora służą tylko do policzenia pełnego sąsiedztwa,
+    ale nie należą do analizowanego terenu.
+    """
+    from qgis.core import QgsSpatialIndex, QgsFeatureRequest, QgsCoordinateTransform
+
+    if hex_df.empty:
+        return hex_df
+
+    # geometrie maski (w CRS warstwy maski)
+    mask_crs = mask_layer.crs()
+    tr = None
+    if mask_crs != project_crs:
+        tr = QgsCoordinateTransform(project_crs, mask_crs, QgsProject.instance())
+
+    index = QgsSpatialIndex(mask_layer.getFeatures())
+    geoms = {f.id(): f.geometry() for f in mask_layer.getFeatures()}
+
+    keep = []
+    for _, row in hex_df.iterrows():
+        pt = QgsPointXY(float(row['center_x']), float(row['center_y']))
+        if tr:
+            pt = tr.transform(pt)
+        g = QgsGeometry.fromPointXY(pt)
+        candidates = index.intersects(g.boundingBox())
+        inside = any(geoms[fid].contains(g) for fid in candidates)
+        keep.append(inside)
+
+    return hex_df[np.array(keep)].reset_index(drop=True)
 
 
 # === GŁÓWNA FUNKCJA ===
@@ -419,98 +690,88 @@ def run_terrain_prediction(nazwa_punktow, nazwa_maski, nazwa_warstwy_przyciete,
     
     print(f"✅ Przycięto: {warstwa_przycieta.featureCount()} obiektów")
     
-    # 2. Predykcja
+   # 2. Predykcja
     print("\n🎯 KROK 2: Predykcja...")
     layer_df = layer_to_df(warstwa_przycieta)
     print(f"Kształt danych: {layer_df.shape}")
-    
+
     required_cols = ['X', 'Y'] + INPUT_FEATURES
     missing_cols = [col for col in required_cols if col not in layer_df.columns]
     if missing_cols:
         print(f"❌ Brakuje kolumn: {missing_cols}")
         return False
-    
+
     predictor = QGISHexLidarPredictor()
-    if not predictor.load_model(MODEL_PATH, SCALER_PATH):
+    if not predictor.load_model(MODEL_PATH):
         print("❌ Nie można wczytać modelu!")
         return False
-    
-    predictions = predictor.predict_points(layer_df)
-    
+
+    hex_df = predictor.predict_hexagons(layer_df)
+
+    if hex_df.empty:
+        print("❌ Brak wyników predykcji")
+        return False
+
+    # ⚠️ Odfiltruj heksagony z BUFORA — punkty były przycięte do maski
+    # powiększonej o NEIGHBOR_RADIUS (żeby sąsiedztwo było pełne), ale
+    # do wyniku trafiają tylko heksagony, których centroid leży W MASCE.
+    n_before = len(hex_df)
+    hex_df = filter_hexes_to_mask(hex_df, warstwa_maski)
+    if len(hex_df) < n_before:
+        print(f"   Odfiltrowano {n_before - len(hex_df)} heksagonów z bufora "
+              f"→ zostaje {len(hex_df)}")
+    if hex_df.empty:
+        print("❌ Brak heksagonów wewnątrz maski")
+        return False
+
     # Statystyki
-    unique, counts = np.unique(predictions, return_counts=True)
-    print("\nRozkład predykcji:")
-    for class_id, count in zip(unique, counts):
-        percentage = (count / len(predictions)) * 100
-        print(f"   Klasa {class_id}: {count:,} punktów ({percentage:.1f}%)")
-    
-    # Konwersja klas
-    predictions_converted = predictions.copy()
-    for i in range(len(predictions_converted)):
-        if predictions_converted[i] in [2, 3]:
-            predictions_converted[i] = 0
-        elif predictions_converted[i] == 4:
-            predictions_converted[i] = 1
-    
-    # Zapisz wyniki
-    layer_df['predicted_label'] = predictions_converted
-    layer_df.to_csv(output_csv, index=False)
-    print(f"✅ Zapisano wyniki do: {output_csv}")
-    
-    # ⬅️ USUŃ WARSTWĘ MEMORY PO UŻYCIU!
+    print("\nRozkład predykcji (heksagony):")
+    for class_id, count in hex_df['predicted_label_multi'].value_counts().sort_index().items():
+        percentage = (count / len(hex_df)) * 100
+        print(f"   Klasa {class_id}: {count:,} heksagonów ({percentage:.1f}%)")
+
+    # Zapisz
+    hex_df.to_csv(output_csv, index=False)
+    print(f"✅ Zapisano {len(hex_df)} heksagonów do: {output_csv}")
+
+    # Usuń warstwę tymczasową
     print("\n🧹 Usuwam warstwę tymczasową...")
     try:
         QgsProject.instance().removeMapLayer(warstwa_przycieta.id())
-        print(f"✅ Usunięto warstwę tymczasową: {nazwa_warstwy_przyciete}")
+        print(f"✅ Usunięto: {nazwa_warstwy_przyciete}")
     except Exception as e:
-        print(f"⚠️ Nie udało się usunąć warstwy tymczasowej: {e}")
-    
+        print(f"⚠️ {e}")
+
     # 3. Wczytaj warstwę wynikową
     print("\n🎯 KROK 3: Wczytywanie warstwy wynikowej...")
-    
-    # Usuń istniejącą warstwę
-    existing_layers = QgsProject.instance().mapLayersByName(nazwa_warstwy_wynik)
-    if existing_layers:
-        for layer in existing_layers:
-            QgsProject.instance().removeMapLayer(layer.id())
-    
-    result_layer = wczytaj_csv_do_qgis(
-        output_csv, 
-        nazwa_kolumny_x='X', 
-        nazwa_kolumny_y='Y',
-        separator=',', 
-        crs_kod=project_crs,
-        nazwa_warstwy=nazwa_warstwy_wynik,
-        kolumny_int=['predicted_label']
-    )
-    
-    if result_layer:
-        # Aplikuj styl
-        style_path = os.path.join(SCRIPTS_PATH, "style/punkty_PBC_new.qml")
-        apply_qml_style_to_layer(nazwa_warstwy_wynik, style_path, show_messages=True)
-        print(f"✅ Warstwa {nazwa_warstwy_wynik} utworzona pomyślnie!")
-        return True
-    else:
+
+    result_layer = wczytaj_heksagony_do_qgis(output_csv, nazwa_warstwy_wynik)
+
+    if not result_layer:
         print(f"❌ Błąd tworzenia warstwy {nazwa_warstwy_wynik}")
         return False
 
+    style_path = os.path.join(SCRIPTS_PATH, "style/PBC_hex.qml")
+    apply_qml_style_to_layer(nazwa_warstwy_wynik, style_path)
+    print(f"✅ Warstwa {nazwa_warstwy_wynik} utworzona pomyślnie!")
+    return True
+
 # === WYKONANIE ===
  # Predykcja 1: Działki zgodne z funkcją
+
 run_terrain_prediction(
-     nazwa_punktow='Classification_2',
-     nazwa_maski='dzialki_zgodne_z_funkcja',
-     nazwa_warstwy_przyciete='Classification_2_przyciete',
-     nazwa_warstwy_wynik='punkty_pbc_wyniki_predykcji',
-     output_csv_name='punkty_pbc_wyniki_predykcji.csv'
- )
- 
- # Predykcja 2: Granica terenu
+    nazwa_punktow='Classification_2',
+    nazwa_maski='dzialki_zgodne_z_funkcja',
+    nazwa_warstwy_przyciete='Classification_2_przyciete',
+    nazwa_warstwy_wynik='heksagony_pbc_predykcja',
+    output_csv_name='heksagony_pbc_predykcja.csv'
+)
+
 run_terrain_prediction(
-     nazwa_punktow='Classification_2',
-     nazwa_maski='granica_terenu',
-     nazwa_warstwy_przyciete='Classification_2_przyciete_teren',
-     nazwa_warstwy_wynik='punkty_pbc_wyniki_predykcji_teren_inwestycji',
-     output_csv_name='punkty_pbc_wyniki_predykcji_teren_inwestycji.csv'
- )
- 
+    nazwa_punktow='Classification_2',
+    nazwa_maski='granica_terenu',
+    nazwa_warstwy_przyciete='Classification_2_przyciete_teren',
+    nazwa_warstwy_wynik='heksagony_pbc_predykcja_teren',
+    output_csv_name='heksagony_pbc_predykcja_teren.csv'
+)
 print("\n🎉 WSZYSTKIE PREDYKCJE ZAKOŃCZONE!")

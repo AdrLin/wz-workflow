@@ -220,11 +220,19 @@ def przewidz_kategorie(feature):
 
 
 class KategoriaDialog(QDialog):
-    def __init__(self, id_poligonu, sugerowana_kategoria, pewnosc_predykcji,kategorie, parent=None):
+    def __init__(self, id_poligonu, sugerowana_kategoria, pewnosc_predykcji, nachylenie, kategorie, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"Wybór kategorii dla {id_poligonu}")
         layout = QVBoxLayout()
-        self.label = QLabel(f"Dach {id_poligonu} - \nsugerowana: {sugerowana_kategoria}; prawdopodobienstwo: {pewnosc_predykcji}")
+        try:
+            nach_txt = f"{float(nachylenie):.1f}°"
+        except (TypeError, ValueError):
+            nach_txt = "—"
+        self.label = QLabel(
+            f"Dach {id_poligonu}\n"
+            f"sugerowana: {sugerowana_kategoria}; prawdopodobieństwo: {pewnosc_predykcji}\n"
+            f"nachylenie: {nach_txt}"
+        )
         layout.addWidget(self.label)
         self.combo = QComboBox()
         self.combo.addItems(kategorie)
@@ -735,9 +743,12 @@ else:
         iface.mapCanvas().refresh()
         
         # Wyświetl dialog
-        sugerowana_kategoria = przewidz_kategorie(feature)[0]
-        pewnosc_predykcji = przewidz_kategorie(feature)[1]
-        dialog = KategoriaDialog(id_poligonu, sugerowana_kategoria, pewnosc_predykcji, kategorie, iface.mainWindow())
+        sugerowana_kategoria, pewnosc_predykcji = przewidz_kategorie(feature)
+        idx_n = feature.fields().indexFromName('nachylenie')
+        nachylenie = feature['nachylenie'] if idx_n != -1 else None
+        dialog = KategoriaDialog(id_poligonu, sugerowana_kategoria, pewnosc_predykcji,
+                                 nachylenie, kategorie, iface.mainWindow())
+        
         dialog.show()
         result = dialog.exec_()
         

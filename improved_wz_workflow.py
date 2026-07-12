@@ -1466,13 +1466,25 @@ class DaneDzialkiDialog(QDialog):
             self.obsluga_kom_combo.currentTextChanged.connect(self.on_obsluga_kom_changed)
             
             self.dzialka_dojazd_edit = QLineEdit(self.data.get('dzialka_dojazd', ''))
-            self.dzialka_dojazd_edit.setPlaceholderText("Nr działki dojazdu")
+            self.dzialka_dojazd_edit.setPlaceholderText("np. 7/23 obręb 0023")
             self.dzialka_dojazd_label = QLabel("Działka dojazdu:")
+            
+            # Przypomnienie o numerze obrębu
+            self.dzialka_dojazd_reminder = QLabel(
+                "<b>⚠️</b> Podaj numer działki <b>wraz z numerem obrębu</b>! "
+                "Np. <i>7/23 obręb 0023</i>"
+            )
+            self.dzialka_dojazd_reminder.setWordWrap(True)
+            self.dzialka_dojazd_reminder.setStyleSheet(
+                "padding: 4px 8px; background-color: #fff3cd; border-radius: 3px; "
+                "color: #856404; font-size: 10px;"
+            )
             
             # Ukryj pole działki dojazdu jeśli obsługa bezpośrednia
             if current_obsluga == "bezpośrednia":
                 self.dzialka_dojazd_edit.hide()
                 self.dzialka_dojazd_label.hide()
+                self.dzialka_dojazd_reminder.hide()
             
             obsluga_layout = QVBoxLayout()
             obsluga_layout.addWidget(self.obsluga_kom_combo)
@@ -1480,11 +1492,72 @@ class DaneDzialkiDialog(QDialog):
             dzialka_dojazd_layout.addWidget(self.dzialka_dojazd_label)
             dzialka_dojazd_layout.addWidget(self.dzialka_dojazd_edit)
             obsluga_layout.addLayout(dzialka_dojazd_layout)
+            obsluga_layout.addWidget(self.dzialka_dojazd_reminder)
             
             basic_layout.addRow("Obsługa komunikacyjna:", obsluga_layout)
             
             basic_group.setLayout(basic_layout)
             scroll_layout.addWidget(basic_group)
+            
+            # === SEKCJA 1b: Linia zabudowy, parkowanie, promesy ===
+            dodatkowe_group = QGroupBox("📐 Linia zabudowy, parkowanie i promesy")
+            dodatkowe_layout = QFormLayout()
+            dodatkowe_layout.setSpacing(10)
+            
+            # --- LINIA ZABUDOWY ---
+            self.lz_w_edit = QLineEdit(str(self.data.get('Lz_w', 'nie dotyczy')))
+            self.lz_w_edit.setPlaceholderText("Wnioskowana linia zabudowy [m] lub 'nie dotyczy'")
+            dodatkowe_layout.addRow("Linia zabudowy wnioskowana (Lz_w):", self.lz_w_edit)
+            
+            self.rodzaj_lz_combo = QComboBox()
+            self.rodzaj_lz_combo.addItems(["obowiązującą", "nieprzekraczalną"])
+            current_rodzaj_lz = str(self.data.get('rodzaj_Lz', 'obowiązującą'))
+            idx_lz = self.rodzaj_lz_combo.findText(current_rodzaj_lz)
+            if idx_lz >= 0:
+                self.rodzaj_lz_combo.setCurrentIndex(idx_lz)
+            dodatkowe_layout.addRow("Rodzaj linii zabudowy:", self.rodzaj_lz_combo)
+            
+            # --- PARKOWANIE ---
+            park_header = QLabel("<b>🅿️ Miejsca parkingowe</b>")
+            dodatkowe_layout.addRow(park_header)
+            
+            self.w_l_park_min_edit = QLineEdit(str(self.data.get('w_l_park_min', '')))
+            self.w_l_park_min_edit.setPlaceholderText("Minimalna liczba miejsc (wnioskowana)")
+            dodatkowe_layout.addRow("Wnioskowana min. liczba miejsc:", self.w_l_park_min_edit)
+            
+            self.w_l_park_max_edit = QLineEdit(str(self.data.get('w_l_park_max', '')))
+            self.w_l_park_max_edit.setPlaceholderText("Maksymalna liczba miejsc (wnioskowana)")
+            self.w_l_park_max_edit.textChanged.connect(self._update_l_park_default)
+            dodatkowe_layout.addRow("Wnioskowana max. liczba miejsc:", self.w_l_park_max_edit)
+            
+            self.l_park_edit = QLineEdit(str(self.data.get('l_park', '')))
+            self.l_park_edit.setPlaceholderText("Domyślnie = wnioskowana max.")
+            dodatkowe_layout.addRow("Ustalona liczba miejsc (l_park):", self.l_park_edit)
+            
+            # --- PROMESY ---
+            promesy_header = QLabel("<b>📄 Promesy (warunki przyłączenia)</b>")
+            dodatkowe_layout.addRow(promesy_header)
+            
+            wodkan_header = QLabel("<i>Wodociągi i kanalizacja:</i>")
+            dodatkowe_layout.addRow(wodkan_header)
+            self.wodkan_data_edit = QLineEdit(str(self.data.get('wodkan_data', '')))
+            self.wodkan_data_edit.setPlaceholderText("Data promesy wod-kan (np. 2024-01-15)")
+            dodatkowe_layout.addRow("Data:", self.wodkan_data_edit)
+            self.wodkan_znak_edit = QLineEdit(str(self.data.get('wodkan_znak', '')))
+            self.wodkan_znak_edit.setPlaceholderText("Numer/znak sprawy promesy wod-kan")
+            dodatkowe_layout.addRow("Znak sprawy:", self.wodkan_znak_edit)
+            
+            energa_header = QLabel("<i>Energia elektryczna:</i>")
+            dodatkowe_layout.addRow(energa_header)
+            self.energa_data_edit = QLineEdit(str(self.data.get('energa_data', '')))
+            self.energa_data_edit.setPlaceholderText("Data promesy energetycznej (np. 2024-02-20)")
+            dodatkowe_layout.addRow("Data:", self.energa_data_edit)
+            self.energa_znak_edit = QLineEdit(str(self.data.get('energa_znak', '')))
+            self.energa_znak_edit.setPlaceholderText("Numer/znak sprawy promesy energetycznej")
+            dodatkowe_layout.addRow("Znak sprawy:", self.energa_znak_edit)
+            
+            dodatkowe_group.setLayout(dodatkowe_layout)
+            scroll_layout.addWidget(dodatkowe_group)
             
             # === SEKCJA 2: Wskaźniki istniejącej zabudowy ===
             wskazniki_group = QGroupBox("📊 Wskaźniki ISTNIEJĄCEJ zabudowy")
@@ -2093,9 +2166,18 @@ class DaneDzialkiDialog(QDialog):
         if text == "bezpośrednia":
             self.dzialka_dojazd_edit.hide()
             self.dzialka_dojazd_label.hide()
+            self.dzialka_dojazd_reminder.hide()
         else:
             self.dzialka_dojazd_edit.show()
-            self.dzialka_dojazd_label.show()        
+            self.dzialka_dojazd_label.show()
+            self.dzialka_dojazd_reminder.show()
+    
+    def _update_l_park_default(self, text):
+        """Jeśli l_park jest puste lub równe poprzedniej wartości max, zaktualizuj."""
+        current_l_park = self.l_park_edit.text().strip()
+        old_max = str(self.data.get('w_l_park_max', ''))
+        if not current_l_park or current_l_park == old_max:
+            self.l_park_edit.setText(text)        
     
     def remove_building_params(self, group_widget):
         """Usuń parametry budynku"""
@@ -2325,19 +2407,27 @@ class DaneDzialkiDialog(QDialog):
             
             for suffix in sorted(suffixes):
                 params = {
-                    'liczba_budynkow': self.data.get(f'liczba_budynkow_{suffix}', 1),
-                    'powierzchnia_zabudowy': self.data.get(f'powierzchnia_zabudowy_{suffix}', ''),
-                    'powierzchnia_kond_podziemnych': self.data.get(f'powierzchnia_kond_podziemnych_{suffix}', ''),
-                    'powierzchnia_kond_nadziemnych': self.data.get(f'powierzchnia_kond_nadziemnych_{suffix}', ''),
-                    'WszerFrontmin': self.data.get(f'WszerFrontmin_{suffix}', ''),
-                    'WszerFrontmax': self.data.get(f'WszerFrontmax_{suffix}', ''),
-                    'w_wys_min': self.data.get(f'w_wys_min_{suffix}', ''),
-                    'w_wys_max': self.data.get(f'w_wys_max_{suffix}', ''),
-                    'dachProj': self.data.get(f'dachProj{suffix.upper()}', ''),
-                    'kalenicaProj': self.data.get(f'kalenica{suffix.upper()}proj', ''),
-                    'nachylenieProjMin': self.data.get(f'nachylenieProjMin_{suffix}', ''),
-                    'nachylenieProjMax': self.data.get(f'nachylenieProjMax_{suffix}', '')
-                }
+                'funkcja_budynku': self.data.get(f'funkcja_budynku_{suffix}', ''),
+                'liczba_budynkow': self.data.get(f'liczba_budynkow_{suffix}', 1),
+                'powierzchnia_zabudowy_min': self.data.get(f'powierzchnia_zabudowy_min_{suffix}', ''),
+                'powierzchnia_zabudowy_max': self.data.get(f'powierzchnia_zabudowy_max_{suffix}', ''),
+                'liczba_kond_podziemnych_min': self.data.get(f'liczba_kond_podziemnych_min_{suffix}', '0'),
+                'liczba_kond_podziemnych_max': self.data.get(f'liczba_kond_podziemnych_max_{suffix}', '0'),
+                'liczba_kond_nadziemnych_min': self.data.get(f'liczba_kond_nadziemnych_min_{suffix}', '1'),
+                'liczba_kond_nadziemnych_max': self.data.get(f'liczba_kond_nadziemnych_max_{suffix}', '1'),
+                'powierzchnia_kond_podziemnych_min': self.data.get(f'powierzchnia_kond_podziemnych_min_{suffix}', ''),
+                'powierzchnia_kond_podziemnych_max': self.data.get(f'powierzchnia_kond_podziemnych_max_{suffix}', ''),
+                'powierzchnia_kond_nadziemnych_min': self.data.get(f'powierzchnia_kond_nadziemnych_min_{suffix}', ''),
+                'powierzchnia_kond_nadziemnych_max': self.data.get(f'powierzchnia_kond_nadziemnych_max_{suffix}', ''),
+                'WszerFrontmin': self.data.get(f'WszerFrontmin_{suffix}', ''),
+                'WszerFrontmax': self.data.get(f'WszerFrontmax_{suffix}', ''),
+                'w_wys_min': self.data.get(f'w_wys_min_{suffix}', ''),
+                'w_wys_max': self.data.get(f'w_wys_max_{suffix}', ''),
+                'dachProj': self.data.get(f'dachProj{suffix.upper()}', ''),
+                'kalenicaProj': self.data.get(f'kalenica{suffix.upper()}proj', ''),
+                'nachylenieProjMin': self.data.get(f'nachylenieProjMin_{suffix}', ''),
+                'nachylenieProjMax': self.data.get(f'nachylenieProjMax_{suffix}', '')
+            }
                 self.building_params.append(params)
             
             # ⬅️ KONWERTUJ WSZYSTKIE WARTOŚCI NA ODPOWIEDNIE TYPY
@@ -2384,6 +2474,27 @@ class DaneDzialkiDialog(QDialog):
             self.data['obsluga_komunikacyjna'] = self.obsluga_kom_combo.currentText()
             self.data['dzialka_dojazd'] = self.dzialka_dojazd_edit.text()
             self.data['tryb_planowanej_zabudowy'] = self.tryb_zabudowy_combo.currentText()
+            
+            # ⬅️ LINIA ZABUDOWY
+            lz_w = self.lz_w_edit.text().strip()
+            if not lz_w or lz_w == '0':
+                lz_w = "nie dotyczy"
+            self.data['Lz_w'] = lz_w
+            self.data['rodzaj_Lz'] = self.rodzaj_lz_combo.currentText()
+            
+            # ⬅️ PARKOWANIE
+            self.data['w_l_park_min'] = self.w_l_park_min_edit.text().strip()
+            self.data['w_l_park_max'] = self.w_l_park_max_edit.text().strip()
+            l_park = self.l_park_edit.text().strip()
+            if not l_park and self.data['w_l_park_max']:
+                l_park = self.data['w_l_park_max']
+            self.data['l_park'] = l_park
+            
+            # ⬅️ PROMESY
+            self.data['wodkan_data'] = self.wodkan_data_edit.text().strip()
+            self.data['wodkan_znak'] = self.wodkan_znak_edit.text().strip()
+            self.data['energa_data'] = self.energa_data_edit.text().strip()
+            self.data['energa_znak'] = self.energa_znak_edit.text().strip()
             
             self.data['powierzchnia_dzialki'] = self.powierzchnia_dzialki_edit.text()
             self.data['powierzchnia_biologicznie_czynna_min'] = self.powierzchnia_pbc_min_edit.text()
@@ -2501,6 +2612,14 @@ class DaneDzialkiDialog(QDialog):
                 dane_arkusz.append(['obsługa komunikacyjna', self.data.get('obsluga_komunikacyjna', ''), '', '', '', '', ''])
                 if self.data.get('dzialka_dojazd'):
                     dane_arkusz.append(['działka dojazdu', self.data.get('dzialka_dojazd', ''), '', '', '', '', ''])
+                dane_arkusz.append(['linia zabudowy wnioskowana', self.data.get('Lz_w', 'nie dotyczy'), '', '', '', '', ''])
+                dane_arkusz.append(['rodzaj linii zabudowy', self.data.get('rodzaj_Lz', ''), '', '', '', '', ''])
+                dane_arkusz.append(['wnioskowane miejsca parkingowe', 
+                                   f"min: {self.data.get('w_l_park_min', '')}", 
+                                   f"max: {self.data.get('w_l_park_max', '')}", '', '', '', ''])
+                dane_arkusz.append(['ustalona liczba miejsc parkingowych', self.data.get('l_park', ''), '', '', '', '', ''])
+                dane_arkusz.append(['promesa wod-kan', self.data.get('wodkan_data', ''), self.data.get('wodkan_znak', ''), '', '', '', ''])
+                dane_arkusz.append(['promesa energetyczna', self.data.get('energa_data', ''), self.data.get('energa_znak', ''), '', '', '', ''])
                 dane_arkusz.append(['tryb planowanej zabudowy', self.data.get('tryb_planowanej_zabudowy', ''), '', '', '', '', ''])    
                 dane_arkusz.append(['', '', '', '', '', '', ''])
                 
@@ -2595,6 +2714,21 @@ class DaneDzialkiDialog(QDialog):
                 eksport_data.append(['obsluga_komunikacyjna', self.data.get('obsluga_komunikacyjna', '')])
                 eksport_data.append(['dzialka_dojazd', self.data.get('dzialka_dojazd', '')])
                 
+                # ⬅️ LINIA ZABUDOWY
+                eksport_data.append(['Lz_w', self.data.get('Lz_w', 'nie dotyczy')])
+                eksport_data.append(['rodzaj_Lz', self.data.get('rodzaj_Lz', 'obowiązującą')])
+                
+                # ⬅️ PARKOWANIE
+                eksport_data.append(['w_l_park_min', self.data.get('w_l_park_min', '')])
+                eksport_data.append(['w_l_park_max', self.data.get('w_l_park_max', '')])
+                eksport_data.append(['l_park', self.data.get('l_park', '')])
+                
+                # ⬅️ PROMESY
+                eksport_data.append(['wodkan_data', self.data.get('wodkan_data', '')])
+                eksport_data.append(['wodkan_znak', self.data.get('wodkan_znak', '')])
+                eksport_data.append(['energa_data', self.data.get('energa_data', '')])
+                eksport_data.append(['energa_znak', self.data.get('energa_znak', '')])
+                
                 eksport_data.append(['tryb_planowanej_zabudowy', self.data.get('tryb_planowanej_zabudowy', '')])
                 
                 for building in building_data:
@@ -2646,6 +2780,7 @@ class SelectFeatureDockWidget(QDockWidget):
     
     def __init__(self, callback_function, parent=None):
         super().__init__("Wybór terenu przedmiotowego", parent)
+        self.setObjectName("SelectFeatureDockWidget")
         
         self.callback_function = callback_function
         self.selected_layer = None
@@ -3296,6 +3431,7 @@ class WZWorkflowDockWidget(QDockWidget):
     
     def __init__(self):
         super().__init__("Analiza WZ - Workflow")
+        self.setObjectName("WZWorkflowDockWidget")
         self.current_step = 0
         self.liczba_budynkow = 0
         self.rozne_funkcje = False
@@ -3841,16 +3977,35 @@ class WZWorkflowDockWidget(QDockWidget):
             self.step_completed()
     
     def show_data_sheet_dialog(self):
-        """Pokaż dialog danych"""
+        """Pokaż NIEMODALNY dialog danych - mapa pozostaje aktywna"""
         try:
-            dialog = DaneDzialkiDialog(self)
-            result = dialog.exec_()
+            # parent=None + ref na self → dialog niezależny od dock widgetu, nie kasowany przez GC
+            self.dane_dialog = DaneDzialkiDialog(parent=None)
             
-            if result == QDialog.Accepted:
-                self.add_message("✅ Dane działki zapisane", "success")
-                self.step_completed()
-            else:
-                self.add_message("⚠️ Anulowano wprowadzanie danych", "warning")
+            # Tryb niemodalny - QGIS, mapa i inne narzędzia pozostają aktywne
+            self.dane_dialog.setModal(False)
+            self.dane_dialog.setWindowModality(Qt.NonModal)
+            self.dane_dialog.setWindowFlags(
+                Qt.Window
+                | Qt.WindowMinimizeButtonHint
+                | Qt.WindowMaximizeButtonHint
+                | Qt.WindowCloseButtonHint
+            )
+            
+            # Sygnały zamiast exec_() - asynchroniczna obsługa wyniku
+            self.dane_dialog.accepted.connect(self._on_dane_dialog_accepted)
+            self.dane_dialog.rejected.connect(self._on_dane_dialog_rejected)
+            
+            self.dane_dialog.show()
+            self.dane_dialog.raise_()
+            self.dane_dialog.activateWindow()
+            
+            self.add_message(
+                "📋 Formularz otwarty - mapa i narzędzia QGIS pozostają aktywne. "
+                "Możesz przesunąć okno, mierzyć, sprawdzać warstwy.",
+                "info"
+            )
+            
         except Exception as e:
             error_msg = f"Błąd podczas otwierania dialogu: {str(e)}"
             self.add_message(f"❌ {error_msg}", "error")
@@ -3858,7 +4013,6 @@ class WZWorkflowDockWidget(QDockWidget):
             import traceback
             traceback.print_exc()
             
-            # Pokaż przycisk do ponownej próby
             self.clear_buttons()
             retry_btn = ModernButton("🔄 Spróbuj ponownie", "secondary")
             retry_btn.clicked.connect(self.show_data_sheet_dialog)
@@ -3867,6 +4021,17 @@ class WZWorkflowDockWidget(QDockWidget):
             skip_btn = ModernButton("⏭️ Pomiń ten krok", "danger")
             skip_btn.clicked.connect(self.step_completed)
             self.button_layout.addWidget(skip_btn)
+    
+    def _on_dane_dialog_accepted(self):
+        """Wywoływane gdy użytkownik kliknął 'Zapisz i kontynuuj'"""
+        self.add_message("✅ Dane działki zapisane", "success")
+        self.dane_dialog = None
+        self.step_completed()
+    
+    def _on_dane_dialog_rejected(self):
+        """Wywoływane gdy użytkownik anulował lub zamknął okno X"""
+        self.add_message("⚠️ Anulowano wprowadzanie danych", "warning")
+        self.dane_dialog = None
     
     
     

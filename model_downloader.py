@@ -2,9 +2,7 @@
 Model Downloader dla wtyczki WZ Workflow
 Automatycznie pobiera duże pliki modeli z GitHub Releases
 """
-import os
 import urllib.request
-import json
 from pathlib import Path
 from qgis.PyQt.QtWidgets import QMessageBox, QProgressDialog
 from qgis.PyQt.QtCore import Qt
@@ -15,13 +13,18 @@ class ModelDownloader:
     """Zarządza pobieraniem dużych plików modeli"""
     
     # Konfiguracja - ZAKTUALIZUJ PO UTWORZENIU RELEASE
-    GITHUB_RELEASE_URL = "https://github.com/AdrLin/wz-workflow/releases/download/v1.0.0/"
-    
+    GITHUB_RELEASE_URL = "https://github.com/AdrLin/wz-workflow/releases/download/v2.0.0/"
+
     MODELS = {
-        "ultimate_building_classifier_svm_0.957_20250911_114900.pkl": {
-            "url": GITHUB_RELEASE_URL + "ultimate_building_classifier_svm_0.957_20250911_114900.pkl",
-            "size_mb": 173,  
-            "description": "Model klasyfikacji budynków (SVM)"
+        "best_dachy_efficient.weights.h5": {
+            "url": GITHUB_RELEASE_URL + "best_dachy_efficient.weights.h5",
+            "size_mb": 39,
+            "description": "Model klasyfikacji dachów (CNN, EfficientNetV2)"
+        },
+        "rf_pbc_ostrow.pkl": {
+            "url": GITHUB_RELEASE_URL + "rf_pbc_ostrow.pkl",
+            "size_mb": 179,
+            "description": "Model klasyfikacji powierzchni biologicznie czynnej (Random Forest)"
         }
     }
     

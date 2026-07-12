@@ -349,6 +349,22 @@ def generate_document():
         # Dodaj datę
         context['today'] = datetime.now().strftime('%d.%m.%Y')
         
+        # === TRANSFORMACJA {{obecne_zagospodarowanie}} ===
+        obecne = str(context.get('obecne_zagospodarowanie', ''))
+        if obecne.lower().startswith('zabudowany'):
+            rodzaj_istn = str(context.get('rodzaj_istniejacy', ''))
+            if not rodzaj_istn:
+                for separator in [' - ', ' + ']:
+                    if separator in obecne:
+                        rodzaj_istn = obecne.split(separator, 1)[1].strip()
+                        break
+            if rodzaj_istn:
+                context['obecne_zagospodarowanie'] = f"występuje {rodzaj_istn}"
+            else:
+                context['obecne_zagospodarowanie'] = "występuje zabudowa"
+        elif obecne.lower() == 'niezabudowany':
+            context['obecne_zagospodarowanie'] = "nie występuje żadna zabudowa"
+        
         # Dodaj dodatkowe zmienne pomocnicze
         context['liczba_budynkow_total'] = totals['suma_liczba_budynkow']
         context['czy_wiele_budynkow'] = len(buildings) > 1
@@ -370,7 +386,7 @@ def generate_document():
         znak_sprawy = str(znak_sprawy).replace('/', '_').replace('\\', '_').replace(' ', '_')
         
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        output_name = f"{znak_sprawy}_analiza_{timestamp}.docx"
+        output_name = f"6730_1_{znak_sprawy}_2026_analiza_{timestamp}.docx"
         output_path = os.path.join(project_directory, output_name)
         
         doc.save(output_path)

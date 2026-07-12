@@ -28,6 +28,22 @@ from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QGroupBox,
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor, QBrush
 
+
+# === ODMIANA RODZAJÓW ZABUDOWY (narzędnik żeński - "zabudową ...") ===
+RODZAJ_ZABUDOWY_ODMIANA = {
+    "zabudowa mieszkaniowa": "mieszkaniową",
+    "zabudowa produkcyjna / usługowa / gospodarcza": "produkcyjną, usługową i gospodarczą",
+    "budynek transportu / łączności": "transportowo-łącznościową",
+    "budynek oświaty i nauki / kultury oraz sportu": "oświatowo-sportową",
+    "szpital lub inny budynek opieki zdrowotnej": "związaną z opieką zdrowotną",
+    "budynek biurowy": "biurową",
+    "zabudowa handlowo-usługowa": "handlowo-usługową",
+    "zabudowa przemysłowa": "przemysłową",
+    "zbiornik / silos / budynek magazynowy": "magazynową",
+    "budynek niemieszkalny": "niemieszkalną",
+    "budynek nieoznaczony w ewidencji": "nieoznaczoną w ewidencji",
+}
+
 try:
     import openpyxl
 except ImportError:
@@ -496,15 +512,15 @@ def parse_identyfikator_dzialki(identyfikator):
     return numery_dzialek_str, numery_obrebow_str
 
 
-def create_results(output_table, mapping):
+def create_results(output_table, mapping, budynki_df):
     results = []
-    # MAKSYMALNE WIZ I WNIZ występujące w obszarze analizowanym, MOŻE SIĘ PRZYDAĆ GDYBY INNE PODMIOTY DZIAŁAŁY INACZEJ NIŻ GMINA OSTRÓW WLKP
-    # results.append({'nazwa_pola': 'maks_inten_zab', 'wartosc': calc_max(output_table, 'WIZ wskaźnik intensywności zabudowy')})
-    # results.append({'nazwa_pola': 'maks_nadz_inten_zab', 'wartosc': calc_max(output_table, 'WNIZ wskaźnik nadziemnej intensywności zabudowy')})
+    # MAKSYMALNE WIZ I WNIZ występujące w obszarze analizowanym
+    results.append({'nazwa_pola': 'maks_inten_zab', 'wartosc': calc_max(output_table, 'WIZ wskaźnik intensywności zabudowy')})
+    results.append({'nazwa_pola': 'maks_nadz_inten_zab', 'wartosc': calc_max(output_table, 'WNIZ wskaźnik nadziemnej intensywności zabudowy')})
     
-    # MAKSYMALNE WIZ I WNIZ DLA PLANOWANEJ INWESTYCJI liczone zdognie z rozporządzeniem
-    results.append({'nazwa_pola': 'maks_inten_zab', 'wartosc': round(calc_mean(output_table, 'WIZ wskaźnik intensywności zabudowy')*1.2,2)})
-    results.append({'nazwa_pola': 'maks_nadz_inten_zab', 'wartosc': round(calc_mean(output_table, 'WNIZ wskaźnik nadziemnej intensywności zabudowy')*1.2,2)})
+    # MAKSYMALNE WIZ I WNIZ DLA PLANOWANEJ INWESTYCJI (1.2 * średnia)
+    results.append({'nazwa_pola': 'maks_inten_zab_inw', 'wartosc': round(calc_mean(output_table, 'WIZ wskaźnik intensywności zabudowy') * 1.2, 2)})
+    results.append({'nazwa_pola': 'maks_nadz_inten_zab_inw', 'wartosc': round(calc_mean(output_table, 'WNIZ wskaźnik nadziemnej intensywności zabudowy') * 1.2, 2)})
     
     results.append({'nazwa_pola': 'min_nadz_inten_zab', 'wartosc': calc_min(output_table, 'WNIZ wskaźnik nadziemnej intensywności zabudowy')})
     results.append({'nazwa_pola': 'Sredni_wiz', 'wartosc': calc_mean(output_table, 'WIZ wskaźnik intensywności zabudowy')})
@@ -535,8 +551,17 @@ def create_results(output_table, mapping):
         if wys_col in output_table.columns:
             results.append({'nazwa_pola': f'srWysZab_{suffix}', 'wartosc': f"{calc_mean(output_table, wys_col)} m"})
             results.append({'nazwa_pola': f'wys_zab_min_{suffix}', 'wartosc': f"{calc_min(output_table, wys_col)} m"})
-            results.append({'nazwa_pola': f'wys_zab_max_{suffix}', 'wartosc': f"{calc_max(output_table, wys_col)} m"})
-    
+
+            # wys_zab_max liczone bezpośrednio z budynki_df (max z budynków, nie max ze średnich per działka)
+            functions = mapping.get(suffix, [])
+            if functions and 'rodzaj_zabudowy' in budynki_df.columns and 'wysokosc' in budynki_df.columns:
+                filtered = budynki_df[budynki_df['rodzaj_zabudowy'].isin(functions)]
+                wys_vals = pd.to_numeric(filtered['wysokosc'], errors='coerce').dropna()
+                max_wys = round(wys_vals.max(), 2) if len(wys_vals) > 0 else 0
+            else:
+                max_wys = calc_max(output_table, wys_col)  # fallback gdyby czegoś brakowało
+            results.append({'nazwa_pola': f'wys_zab_max_{suffix}', 'wartosc': f"{max_wys} m"})
+            
     # === POBIERZ IDENTYFIKATOR DZIAŁKI PRZEDMIOTOWEJ ===
     # Wczytaj z pliku dane_dzialki_przedmiotowej.xlsx
     project_directory = get_project_directory()
@@ -706,6 +731,58 @@ def create_geom_dachow_text(roof_df, suffix):
     return ", ".join(opisy) + ","
 
 
+def create_zabudowa_obszar_text(output_table):
+    """
+    Tworzy tekst opisowy zestawienia rodzajów zabudowy na obszarze analizowanym.
+    Rozdziela typy zabudowy po średnikach i zlicza poszczególne rodzaje.
+    """
+    if 'rodzaj zabudowy' not in output_table.columns:
+        return ""
+    
+    # Zbierz wszystkie typy zabudowy (rozdzielone średnikami) do jednej listy
+    all_types = []
+    for val in output_table['rodzaj zabudowy'].dropna():
+        if val and str(val).strip():
+            # Rozdziel po średniku i dodaj każdy typ osobno
+            for typ in str(val).split(';'):
+                typ = typ.strip()
+                if typ:
+                    all_types.append(typ.lower())
+    
+    if not all_types:
+        return ""
+    
+    # Zlicz wystąpienia każdego typu
+    from collections import Counter
+    type_counts = Counter(all_types)
+    total = sum(type_counts.values())
+    
+    # Podziel na kategorie: główne (>=10%) i sporadyczne (<10%)
+    glowne = []
+    sporadyczne = []
+    
+    for typ, count in type_counts.most_common():
+        pct = (count / total) * 100
+        # Odmiana rodzaju zabudowy (narzędnik)
+        odmiana = RODZAJ_ZABUDOWY_ODMIANA.get(typ, typ)
+        
+        if pct < 10:
+            sporadyczne.append(odmiana)
+        else:
+            glowne.append(odmiana)
+    
+    # Buduj tekst
+    parts = []
+    if glowne:
+        parts.extend(glowne)
+    if sporadyczne:
+        parts.append("sporadycznie - " + ", ".join(sporadyczne))
+    
+    return ", ".join(parts) + ""
+
+
+
+
 def process_layers_unified():
     print("\n" + "="*70)
     print("OUTPUT AND RESULTS - UNIFIED v4.0")
@@ -754,7 +831,7 @@ def process_layers_unified():
     
     # Tworzenie tabel
     output_table = create_output_table(dzialki_df, budynki_df, mapping)
-    results_df = create_results(output_table, mapping)
+    results_df = create_results(output_table, mapping, budynki_df)
     roof_stats_df = generate_roof_stats(budynki_df, mapping)
     
     # Dodaj geometriaDachow
@@ -764,6 +841,14 @@ def process_layers_unified():
             'nazwa_pola': f'geometriaDachow_{suffix}',
             'wartosc': geom_text
         }])], ignore_index=True)
+    
+    # === DODAJ ZESTAWIENIE ZABUDOWY OBSZARU ===
+    zabudowa_text = create_zabudowa_obszar_text(output_table)
+    results_df = pd.concat([results_df, pd.DataFrame([{
+        'nazwa_pola': 'zabudowa_obszar',
+        'wartosc': zabudowa_text
+    }])], ignore_index=True)
+    print(f"🏘️ Zabudowa obszaru: {zabudowa_text}")
     
     # Wczytaj dane działki
     dane_path = Path(project_directory) / "dane_dzialki_przedmiotowej.xlsx"
@@ -775,6 +860,32 @@ def process_layers_unified():
     # Połącz do_eksportu
     eksport_df = pd.concat([dane_df, results_df], ignore_index=True)
     eksport_df = eksport_df.drop_duplicates(subset='nazwa_pola', keep='last')
+    
+    # Zamień kropki na przecinki w kolumnie 'wartosc' (format polski dla Worda)
+    for idx in eksport_df.index:
+        val = eksport_df.at[idx, 'wartosc']
+        
+        if pd.isna(val):
+            continue
+        
+        # Float -> string z przecinkiem (np. 0.65 -> "0,65"; 5.0 -> "5")
+        if isinstance(val, float):
+            if val.is_integer():
+                eksport_df.at[idx, 'wartosc'] = str(int(val))
+            else:
+                eksport_df.at[idx, 'wartosc'] = str(val).replace('.', ',')
+            continue
+        
+        # String z liczbą + ewentualną jednostką (np. "7.5 m" -> "7,5 m")
+        # Tylko gdy część przed pierwszą spacją jest liczbą — chroni TERYT, znaki sprawy itp.
+        if isinstance(val, str) and '.' in val:
+            parts = val.strip().split(' ', 1)
+            try:
+                float(parts[0])
+            except ValueError:
+                continue
+            new_num = parts[0].replace('.', ',')
+            eksport_df.at[idx, 'wartosc'] = new_num + (' ' + parts[1] if len(parts) > 1 else '')
     
     # Zapisz
     output_path = os.path.join(project_directory, "analiza_wz_kompletna.xlsx")

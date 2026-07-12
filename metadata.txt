@@ -3,40 +3,56 @@ name=WZ Workflow
 qgisMinimumVersion=3.0
 qgisMaximumVersion=3.99
 description=Comprehensive tool for Polish urban planning analysis (Building Permit Conditions - Warunki Zabudowy)
-version=1.0.2
+version=2.0.0
 author=Adrian Linkowski
 email=link.mapy@gmail.com
 
 about=Advanced QGIS plugin for automated urban planning analysis in Poland (Warunki Zabudowy - WZ).
-    
+
     Features:
     • 14-step automated workflow for building permit analysis
-    • Machine learning-based terrain and building classification
-    • LiDAR point cloud processing
+    • Deep-learning (CNN) roof-shape classification
+    • Random Forest classification of biologically active surface (PBC) from LiDAR
+    • LiDAR point cloud processing, robust on very large clouds
     • Cadastral data integration (ULDK/BDOT)
     • Automated Word report generation
     • Urban planning indicators (WPZ, WIZ, WPBC)
-    
-    ML models (~174 MB) are downloaded automatically on first use from GitHub.
-    
+
+    ML models (~218 MB) are downloaded automatically on first use from GitHub Releases.
+
     ---
-    
+
     Kompleksowe narzędzie do automatycznej analizy warunków zabudowy w Polsce.
-    Automatyzuje 14-stopniowy proces analizy urbanistycznej z wykorzystaniem uczenia maszynowego.
-    Modele ML (~174 MB) są pobierane automatycznie przy pierwszym uruchomieniu.
+    Automatyzuje 14-stopniowy proces analizy urbanistycznej z wykorzystaniem uczenia maszynowego
+    (klasyfikacja kształtu dachów siecią CNN, klasyfikacja powierzchni biologicznie czynnej
+    lasem losowym na podstawie danych LiDAR).
+    Modele ML (~218 MB) są pobierane automatycznie przy pierwszym uruchomieniu z GitHub Releases.
 
 tracker=https://github.com/AdrLin/wz-workflow/issues
 repository=https://github.com/AdrLin/wz-workflow
 homepage=https://github.com/AdrLin/wz-workflow
 
-tags=python,urban planning,poland,cadastral,analysis,building,machine learning,lidar,permits
+tags=python,urban planning,poland,cadastral,analysis,building,machine learning,deep learning,cnn,random forest,lidar,permits
 
 category=Vector
 icon=icon.png
 
 experimental=False
 deprecated=False
-changelog=1.0.2
+changelog=2.0.0
+    - Completely rebuilt PBC (biologically active surface) classifier: Random Forest replaces the previous SVM/MLP approach
+    - New 13-class surface taxonomy reflecting real-world land cover encountered in WZ analyses
+    - 28 engineered features including chromaticity, spectral ratio indices and neighbourhood geometry
+    - Configurable decision threshold lets the model err on the conservative side when uncertain
+    - New deep-learning (CNN, EfficientNetV2) model for roof-shape classification, replacing the earlier classifier
+    - Improved robustness for extremely large LiDAR point clouds (memory-safe per-parcel processing)
+    - Prediction layer now stores per-hexagon class probability for quality inspection
+    - New plugin icon; several internal scripts refined and stabilised
+    1.0.4
+    - The script for determining the analyzed area and the descriptive analysis templates were adapted to reflect the latest changes in the law
+    1.0.3
+    - Minor fixes and template updates
+    1.0.2
     - Fixed plugin packaging (removed large files from ZIP)
     1.0.1
     - Added automatic municipality name extraction from granica_terenu layer
@@ -45,9 +61,8 @@ changelog=1.0.2
     1.0.0
     - Initial public release
     - Full 14-step WZ analysis workflow
-    - Automatic ML model download (~174 MB)
-    - Terrain classification (flat/gable/hip/shed roof)
-    - Building classification with SVM
+    - Automatic ML model download
+    - Roof-shape classification (flat/gable/hip/shed)
     - Point cloud processing (LiDAR)
     - Automated Word report generation
     - Urban planning indicators calculation

@@ -31,10 +31,22 @@
 - ✅ **Generowanie raportów** - export do Word z mapami i tabelami
 
 ### 📊 Analiza terenu
-- Klasyfikacja typów dachów: płaski / dwuspadowy / jednospadowy / czterospadowy
+- Klasyfikacja typów dachów: płaski / dwuspadowy / jednospadowy / czterospadowy (CNN, EfficientNetV2)
+- Klasyfikacja powierzchni biologicznie czynnej (PBC) z chmury LiDAR — las losowy, 13 klas pokrycia terenu
 - Wykrywanie granic działek i budynków
 - Obliczanie odległości od granic
 - Analiza wysokości z chmur punktów
+
+### 🌿 Klasyfikator PBC (nowość w 2.0.0)
+
+Powierzchnia biologicznie czynna wyznaczana jest automatycznie z kolorowanej chmury punktów LiDAR.
+Teren dzielony jest na heksagony (bok 0,36 m), a każdy z nich klasyfikowany jest do jednej z 13 klas
+pokrycia (trawnik, roślinność ruderalna, pole uprawne, zaorane pole, droga gruntowa, asfalt, beton,
+kostka, kort, powierzchnie zacienione), które następnie mapowane są na kategorie PBC / nie-PBC.
+
+Model korzysta z 28 cech: chromatyczności, indeksów spektralnych, surowej intensywności odbicia
+oraz geometrii sąsiedztwa. Warstwa wynikowa zawiera dodatkowo prawdopodobieństwo decyzji
+(`p_pbc`), co pozwala obejrzeć obszary, w których model był najmniej pewny.
 
 ### 🔢 Wskaźniki urbanistyczne
 - **WPZ** - Wskaźnik powierzchni zabudowy
@@ -54,7 +66,7 @@
 4. Wyszukaj: `WZ Workflow`
 5. Kliknij: **Zainstaluj wtyczkę**
 
-**Przy pierwszym uruchomieniu** wtyczka automatycznie pobierze modele ML (~173 MB).
+**Przy pierwszym uruchomieniu** wtyczka automatycznie pobierze modele ML (~218 MB).
 
 ### Ręczna instalacja
 

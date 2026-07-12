@@ -1,21 +1,39 @@
 # Template opisu dla GitHub Release
 
-Skopiuj i dostosuj ten template podczas tworzenia Release na GitHubie.
+Skopiuj i dostosuj przy tworzeniu Release na GitHubie.
 
 ---
 
-## WZ Workflow v1.0.0
+## WZ Workflow v2.0.0
 
-Pierwsza publiczna wersja wtyczki QGIS do automatycznej analizy warunków zabudowy w Polsce.
+Duże wydanie: całkowicie przebudowany klasyfikator powierzchni biologicznie czynnej (PBC)
+oraz nowy model rozpoznawania kształtu dachów.
 
-### 🎯 Główne funkcje
+### 🌿 Nowy klasyfikator PBC (Random Forest)
 
-- ✅ **14-stopniowy zautomatyzowany workflow** analizy urbanistycznej
-- ✅ **Klasyfikacja terenu ML** - rozpoznawanie typów dachów (płaski/dwuspadowy/jednospadowy/czterospadowy)
-- ✅ **Analiza parametrów zabudowy** - automatyczne obliczanie WPZ, WIZ, WPBC
-- ✅ **Przetwarzanie chmur punktów** - integracja z danymi LiDAR
-- ✅ **Integracja z danymi katastralnymi** - działki i budynki z ULDK/BDOT
-- ✅ **Generowanie raportów Word** - automatyczne tworzenie dokumentacji
+- **Las losowy** zastępuje wcześniejsze podejście SVM / MLP
+- **13 klas pokrycia terenu** odzwierciedlających realia analiz WZ (trawnik zadbany,
+  roślinność ruderalna, pole uprawne, zaorane pole, droga gruntowa, asfalt, beton,
+  kostka czerwona i niebieska, kort, powierzchnie zacienione)
+- **28 cech**: chromatyczność, indeksy spektralne (GRI/GBI/RBI), surowa intensywność
+  odbicia, jasność oraz geometria sąsiedztwa (planarność, chropowatość, jednorodność otoczenia)
+- **Konfigurowalny próg decyzyjny** — w razie niepewności model przechyla się na stronę
+  bezpieczniejszą, zamiast zawyżać wskaźnik
+- Warstwa wynikowa zawiera **prawdopodobieństwo decyzji** (`p_pbc`), co pozwala obejrzeć
+  obszary o najniższej pewności i zweryfikować je ręcznie
+
+### 🏠 Nowy model dachów (CNN)
+
+Klasyfikacja kształtu dachu siecią **EfficientNetV2** (płaski / dwuspadowy / jednospadowy /
+czterospadowy), zastępująca wcześniejszy klasyfikator.
+
+### ⚡ Pozostałe zmiany
+
+- Przetwarzanie bardzo dużych chmur LiDAR bez przepełnienia pamięci (praca per działka)
+- Ustabilizowane skrypty wewnętrzne
+- Nowa ikona wtyczki
+
+---
 
 ### 📦 Instalacja
 
@@ -25,76 +43,66 @@ QGIS → Wtyczki → Zarządzaj wtyczkami → Wyszukaj "WZ Workflow" → Zainsta
 ```
 
 #### Ręczna instalacja
-1. Pobierz `wz-workflow-1.0.0.zip` (poniżej)
-2. W QGIS: Wtyczki → Zarządzaj wtyczkami → Zainstaluj z ZIP
-3. Wybierz pobrany plik
+1. Pobierz `wz_workflow-2.0.0.zip` (poniżej, w sekcji Assets)
+2. W QGIS: **Wtyczki → Zarządzaj wtyczkami → Zainstaluj z ZIP**
+3. Wskaż pobrany plik
+
+---
 
 ### 📥 Modele uczenia maszynowego
 
-**Modele są pobierane automatycznie przy pierwszym uruchomieniu wtyczki.**
-
-Jeśli chcesz pobrać je ręcznie:
+**Modele pobierają się automatycznie przy pierwszym uruchomieniu wtyczki.**
+Ze względu na rozmiar nie są dołączone do paczki ZIP.
 
 | Plik | Rozmiar | Opis |
 |------|---------|------|
-| `best_hex_model.pth` | 173 MB | Model PyTorch do klasyfikacji terenu (hexagony) |
-| `ultimate_building_classifier_svm.pkl` | ~5 MB | Model SVM do klasyfikacji budynków |
-| `scaler_hex.pkl` | <1 MB | Scaler dla modelu hexagonowego |
+| `rf_pbc_ostrow.pkl` | ~179 MB | Klasyfikator PBC (Random Forest, 13 klas, 28 cech) |
+| `best_dachy_efficient.weights.h5` | ~39 MB | Klasyfikator kształtu dachu (CNN, EfficientNetV2) |
 
-**Instalacja ręczna modeli:**
-1. Pobierz pliki z sekcji Assets poniżej
-2. Umieść w katalogu wtyczki:
-   - Windows: `C:\Users\USERNAME\AppData\Roaming\QGIS\QGIS3\profiles\default\python\plugins\wz-workflow\`
-   - Linux: `~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/wz-workflow/`
-   - Mac: `~/Library/Application Support/QGIS/QGIS3/profiles/default/python/plugins/wz-workflow/`
+**Instalacja ręczna modeli** (gdy automatyczne pobieranie zawiedzie):
 
-### 🚀 Szybki start
+1. Pobierz oba pliki z sekcji **Assets** poniżej
+2. Umieść je bezpośrednio w katalogu wtyczki:
+   - **Linux:** `~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/wz_workflow/`
+   - **Windows:** `C:\Users\USERNAME\AppData\Roaming\QGIS\QGIS3\profiles\default\python\plugins\wz_workflow\`
+   - **macOS:** `~/Library/Application Support/QGIS/QGIS3/profiles/default/python/plugins/wz_workflow/`
 
-1. Załaduj warstwę działek katastralnych
-2. Załaduj warstwę budynków
-3. Uruchom: **Wtyczki → WZ Workflow**
-4. Postępuj zgodnie z 14-stopniowym workflow
-5. Wygeneruj raport analizy
+---
 
 ### 📋 Wymagania
 
 - QGIS 3.0 lub nowszy
-- Python 3.7+
-- Połączenie z internetem (przy pierwszym uruchomieniu - pobieranie modeli)
+- Python 3.9+
+- Połączenie z internetem przy pierwszym uruchomieniu (pobieranie modeli)
+- Zalecane min. 8 GB RAM (przetwarzanie chmur punktów)
 
-### 🔧 Zależności Python (instalowane automatycznie)
+### 🔧 Zależności Python
 
-- PyTorch
-- python-docx
-- NumPy
-- PDAL (opcjonalnie - dla przetwarzania chmur punktów)
+- scikit-learn, joblib (klasyfikator PBC)
+- TensorFlow / Keras (klasyfikator dachów)
+- scipy, numpy, pandas
+- python-docx (raporty)
+- PDAL (opcjonalnie — przetwarzanie chmur punktów)
 
-### 🐛 Znane problemy
+### 🐛 Znane ograniczenia
 
-- Pierwsze uruchomienie wymaga czasu na pobranie modeli (~173 MB)
-- Chmury punktów wymagają dużo pamięci RAM (zalecane min. 8 GB)
+- Model PBC wytrenowano na danych z **jednego obszaru** (Ostrów Wielkopolski).
+  Na nalotach o innej kalibracji sensora dokładność może być niższa — planowana jest
+  możliwość samodzielnego dotrenowania modelu na własnym regionie.
+- Najtrudniejsze do rozróżnienia pary to **beton ↔ droga gruntowa** oraz powierzchnie
+  w cieniu. Warstwa `p_pbc` pozwala wychwycić takie przypadki.
+- Pierwsze uruchomienie wymaga pobrania ~218 MB modeli.
 
-### 📝 Changelog
-
-**v1.0.0** (2024-XX-XX)
-- Pierwsza publiczna wersja
-- Pełny 14-stopniowy workflow analizy WZ
-- Automatyczne pobieranie modeli ML
-- Klasyfikacja terenu (4 typy dachów)
-- Klasyfikacja budynków
-- Przetwarzanie chmur punktów LiDAR
-- Automatyczne generowanie raportów Word
-- Obliczanie wskaźników urbanistycznych
+---
 
 ### 🆘 Wsparcie
 
-- **Dokumentacja:** [README.md](https://github.com/TwojeRepo/wz-workflow#readme)
-- **Zgłaszanie błędów:** [Issues](https://github.com/TwojeRepo/wz-workflow/issues)
-- **Pytania:** [Discussions](https://github.com/TwojeRepo/wz-workflow/discussions)
+- **Dokumentacja:** [README.md](https://github.com/AdrLin/wz-workflow#readme)
+- **Zgłaszanie błędów:** [Issues](https://github.com/AdrLin/wz-workflow/issues)
 
 ### 📄 Licencja
 
-[Twoja licencja, np. GPL-3.0]
+GPL-3.0
 
 ### 👨‍💻 Autor
 
@@ -102,16 +110,20 @@ Adrian Linkowski
 
 ---
 
-## Assets do dodania do Release:
+## ✅ Checklista Assets do dodania do Release
 
-1. ✅ `wz-workflow-1.0.0.zip` - Pełna wtyczka (BEZ modeli)
-2. ✅ `best_hex_model.pth` - Model klasyfikacji terenu
-3. ✅ `ultimate_building_classifier_svm.pkl` - Model SVM
-4. ✅ `scaler_hex.pkl` - Scaler
+1. `wz_workflow-2.0.0.zip` — wtyczka **BEZ modeli** (~2,3 MB)
+2. `rf_pbc_ostrow.pkl` — model PBC (~179 MB)
+3. `best_dachy_efficient.weights.h5` — model dachów (~39 MB)
 
-**WAŻNE:** Po utworzeniu Release skopiuj dokładne URLe do plików i zaktualizuj je w `model_downloader.py`!
+**WAŻNE:** URL w `model_downloader.py` musi wskazywać na tag tego wydania:
 
-Przykładowy URL:
+```python
+GITHUB_RELEASE_URL = "https://github.com/AdrLin/wz-workflow/releases/download/v2.0.0/"
 ```
-https://github.com/username/wz-workflow/releases/download/v1.0.0/best_hex_model.pth
+
+Po opublikowaniu Release sprawdź, czy pliki są pobieralne:
+```
+https://github.com/AdrLin/wz-workflow/releases/download/v2.0.0/rf_pbc_ostrow.pkl
+https://github.com/AdrLin/wz-workflow/releases/download/v2.0.0/best_dachy_efficient.weights.h5
 ```

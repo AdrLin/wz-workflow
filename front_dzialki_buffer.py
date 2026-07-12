@@ -108,8 +108,8 @@ class FrontDzialkiController:
         buffer_distance = self.front_length * 3
         if buffer_distance < 50:
             buffer_distance = 50
-        #elif buffer_distance >200:
-            #buffer_distance = 200
+        elif buffer_distance >200:
+            buffer_distance = 200
         print(f"🔧 Tworzenie otoczki z promieniem: {round(buffer_distance, 2)} m")
         
         # Przygotowanie ścieżki wyjściowej

@@ -118,8 +118,23 @@ class DrawingController:
             if id_field_index == -1 or length_field_index == -1:
                 return
             
-            # Obliczanie długości geometrii
+           # Obliczanie długości geometrii
             length = feature.geometry().length()
+
+            # Walidacja pomiaru
+            MIN_SZEROKOSC = 2.0  # [m] — spójne z progiem w wczytaj_csv
+            if length < MIN_SZEROKOSC:
+                print(f"⚠️ Odrzucono pomiar {self.current_building_id}: "
+                      f"{round(length, 2)} m — poniżej progu {MIN_SZEROKOSC} m (lub zero). "
+                      f"Narysuj linię jeszcze raz.")
+                # Usuń błędny obiekt z warstwy — zostaje podświetlony ten sam budynek
+                self.drawing_layer.deleteFeature(feature_id)
+                iface.messageBar().pushWarning(
+                    "Błędny pomiar",
+                    f"Szerokość {round(length, 2)} m jest nieprawidłowa. "
+                    f"Narysuj linię elewacji ponownie (min. {MIN_SZEROKOSC} m)."
+                )
+                return  # NIE zapisuj, NIE przechod do next_building
             
             # Aktualizacja pól
             self.drawing_layer.changeAttributeValue(feature_id, id_field_index, self.current_building_id)
@@ -231,15 +246,28 @@ class DrawingController:
             return None
     
     def wczytaj_csv(self, path):
-        """Bezpieczne wczytywanie CSV"""
+        """Bezpieczne wczytywanie CSV — pomija rekordy z brakiem lub podejrzaną szerokością"""
         budynki = set()
+        MIN_SZEROKOSC = 2.0  # [m] — budynki poniżej tego progu wymagają ponownego pomiaru
         try:
             if os.path.exists(path):
                 with open(path, newline='', encoding='utf-8') as f:
                     reader = csv.DictReader(f)
                     for row in reader:
-                        if 'ID_BUDYNKU' in row:
-                            budynki.add(row['ID_BUDYNKU'])
+                        if 'ID_BUDYNKU' not in row:
+                            continue
+                        building_id = row['ID_BUDYNKU']
+                        szerokosc_str = row.get('szer_elew_front', '').strip()
+                        try:
+                            szerokosc = float(szerokosc_str)
+                        except (ValueError, TypeError):
+                            szerokosc = None
+    
+                        if szerokosc is not None and szerokosc >= MIN_SZEROKOSC:
+                            budynki.add(building_id)
+                        else:
+                            print(f"⚠️ Budynek {building_id}: "
+                                  f"szerokość '{szerokosc_str}' → wymaga ponownego pomiaru")
         except Exception as e:
             print(f"❌ Błąd wczytywania CSV: {e}")
         return budynki
@@ -485,19 +513,25 @@ class DrawingController:
                 memory_layer.dataProvider().addAttributes(fields)
                 memory_layer.updateFields()
                 
-                features = []
+                # Deduplikacja: dla każdego ID_BUDYNKU zostaw OSTATNI (najnowszy) wpis
+                # Append mode w CSV powoduje, że poprawny pomiar jest na końcu, zły na początku
+                rows_by_id = {}
                 for row in reader:
+                    building_id = row.get('ID_BUDYNKU', '').strip()
+                    if building_id:
+                        rows_by_id[building_id] = row  # nadpisuje poprzedni — ostatni wygrywa
+
+                features = []
+                for row in rows_by_id.values():
                     feat = QgsFeature()
                     feat.initAttributes(len(fields))
                     for i, name in enumerate(fieldnames):
                         if name != "id":
                             value = row[name]
-                            # Konwersja do float dla pola szer_elew_front
                             if name == "szer_elew_front":
                                 try:
                                     value = float(value) if value and value.strip() else None
                                 except ValueError:
-                                    print(f"⚠️ Nie można przekonwertować wartości '{value}' na liczbę w wierszu")
                                     value = None
                             feat[i] = value
                     features.append(feat)

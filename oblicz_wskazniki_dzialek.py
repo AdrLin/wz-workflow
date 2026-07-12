@@ -5,18 +5,20 @@ Created on Tue Jul 22 17:16:26 2025
 
 @author: adrian
 """
-from qgis.core import (
-    QgsProject, QgsVectorLayer, QgsField, QgsDataSourceUri,
-    QgsFields,QgsFeature,QgsWkbTypes,QgsProcessing,
-    QgsProcessingContext, QgsFeatureRequest)
+from qgis.core import (QgsPointXY,
+    QgsProject, QgsVectorLayer, QgsField,QgsSpatialIndex,
+    QgsFields,QgsFeature,QgsWkbTypes,QgsGeometry,
+    QgsFeatureRequest)
 from qgis import processing
+from PyQt5.QtWidgets import QProgressDialog, QApplication
 from PyQt5.QtCore import QVariant
 from qgis.utils import iface
 from pathlib import Path
 import os
 from PyQt5.QtWidgets import ( QMessageBox, QFileDialog)
 import time
-
+from PyQt5.QtCore import Qt
+import math
 # Zmniejsz użycie pamięci cache
 from qgis.core import QgsSettings
 QgsSettings().setValue('/qgis/memoryCacheSize', 200)  # MB zamiast domyślnych 300MB
@@ -30,6 +32,229 @@ iface.mapCanvas().setRenderFlag(False)
 project_crs = QgsProject.instance().crs()
 print(f"CRS projektu: {project_crs.authid()}")
 
+
+def punkty_na_heksagony(layer_name, hex_size=0.36):
+    """Zamienia warstwę punktową na warstwę poligonów heksagonalnych (memory layer)."""
+    layers = QgsProject.instance().mapLayersByName(layer_name)
+    if not layers:
+        print(f"  ⚠️  Brak warstwy: {layer_name}")
+        return None
+    layer = layers[0]
+    crs = layer.crs().authid()
+
+    # Wektoryzowane przypisanie punktów do heksagonów
+    coords = {}
+    for feat in layer.getFeatures():
+        pt = feat.geometry().asPoint()
+        x, y = pt.x(), pt.y()
+        q = (2/3 * x) / hex_size
+        r = (-1/3 * x + math.sqrt(3)/3 * y) / hex_size
+        q_r = round(q)
+        r_r = round(r)
+        s_r = round(-q - r)
+        q_d, r_d, s_d = abs(q_r - q), abs(r_r - r), abs(s_r - (-q - r))
+        if q_d > r_d and q_d > s_d:
+            q_r = -r_r - s_r
+        elif r_d > s_d:
+            r_r = -q_r - s_r
+        coords[(q_r, r_r)] = True  # deduplikacja
+
+    # Twórz poligony
+    hex_layer = QgsVectorLayer(f"Polygon?crs={crs}", f"{layer_name}_hex", "memory")
+    provider = hex_layer.dataProvider()
+    provider.addAttributes([QgsField("hex_q", QVariant.Int), QgsField("hex_r", QVariant.Int)])
+    hex_layer.updateFields()
+
+    features = []
+    for (q, r) in coords:
+        cx = hex_size * 1.5 * q
+        cy = hex_size * (math.sqrt(3)/2 * q + math.sqrt(3) * r)
+        pts = []
+        for i in range(6):
+            angle = math.radians(60 * i)
+            pts.append(QgsPointXY(cx + hex_size * math.cos(angle), cy + hex_size * math.sin(angle)))
+        pts.append(pts[0])
+
+        feat = QgsFeature(hex_layer.fields())
+        feat.setGeometry(QgsGeometry.fromPolygonXY([pts]))
+        feat.setAttribute("hex_q", int(q))
+        feat.setAttribute("hex_r", int(r))
+        features.append(feat)
+
+    provider.addFeatures(features)
+    hex_layer.updateExtents()
+    print(f"  ✓ {layer_name} → {len(features)} heksagonów")
+    return hex_layer
+
+def analiza_pbc_per_dzialka(dzialki_layer_name, nazwa_maski=None):
+    """
+    Oblicza PBC dla każdej działki.
+    Wszystkie warstwy (punktowe i predykcyjne) są traktowane jako heksagony.
+
+    Parametry
+    ---------
+    dzialki_layer_name : str
+        Nazwa warstwy działek (np. 'dzialki_zgodne_z_funkcja')
+    nazwa_maski : str lub None
+        Jeśli podano — używa tej warstwy jako działek (np. 'granica_terenu').
+    """
+
+    start_time = time.time()
+
+    # === 1. Pobierz warstwę działek ===
+    target_name = nazwa_maski if nazwa_maski else dzialki_layer_name
+    dzialki_layers = QgsProject.instance().mapLayersByName(target_name)
+    if not dzialki_layers:
+        raise ValueError(f"Nie znaleziono warstwy działek: {target_name}")
+    dzialki_layer = dzialki_layers[0]
+    n_dzialek = dzialki_layer.featureCount()
+    print(f"\n📐 Działki: {target_name} ({n_dzialek} obiektów)")
+
+    # === 2. Przygotuj źródła heksagonów PBC ===
+    print("\n📐 Konwersja warstw punktowych na heksagony...")
+    all_hex_sources = []
+
+    # Warstwy punktowe → heksagony (wszystkie = PBC)
+    for layer_name in ['Classification_3', 'Classification_4',
+                       'Classification_5', 'Classification_9']:
+        hex_layer = punkty_na_heksagony(layer_name, hex_size=0.36)
+        if hex_layer:
+            all_hex_sources.append({
+                'layer':  hex_layer,
+                'index':  QgsSpatialIndex(hex_layer.getFeatures()),
+                'filter': None,
+                'name':   layer_name,
+            })
+
+    # Warstwy predykcji PBC (już są heksagonami, filtrowane po predicted_label)
+    for layer_name, filtr in [
+        ('heksagony_pbc_predykcja',       '"predicted_label" = 0'),
+        ('heksagony_pbc_predykcja_teren', '"predicted_label" = 0'),
+    ]:
+        layers = QgsProject.instance().mapLayersByName(layer_name)
+        if not layers:
+            print(f"  ⚠️  Pominięto (brak): {layer_name}")
+            continue
+        layer = layers[0]
+        all_hex_sources.append({
+            'layer':  layer,
+            'index':  QgsSpatialIndex(layer.getFeatures()),
+            'filter': filtr,
+            'name':   layer_name,
+        })
+        print(f"  ✓ {layer_name} ({layer.featureCount():,} hex)")
+
+    if not all_hex_sources:
+        raise ValueError("Brak jakichkolwiek warstw PBC!")
+
+    # === 3. Dodaj pole PBC jeśli nie istnieje ===
+    provider = dzialki_layer.dataProvider()
+    if 'PBC' not in [f.name() for f in dzialki_layer.fields()]:
+        provider.addAttributes([QgsField('PBC', QVariant.Double, len=10, prec=2)])
+        dzialki_layer.updateFields()
+        print("  ✓ Dodano pole PBC")
+
+    pbc_idx = dzialki_layer.fields().indexOf('PBC')
+
+    # === 4. Progress dialog ===
+    progress = QProgressDialog(
+        f"Analiza PBC per działka\n0 / {n_dzialek}",
+        "Anuluj", 0, n_dzialek, iface.mainWindow()
+    )
+    progress.setWindowTitle("Analiza PBC")
+    progress.setWindowModality(Qt.WindowModal)
+    progress.setValue(0)
+
+    # === 5. Pętla po działkach ===
+    updates       = {}
+    pbc_dict      = {}
+    empty_dzialki = 0
+
+    try:
+        iface.mapCanvas().setRenderFlag(False)
+
+        for i, dzialka in enumerate(dzialki_layer.getFeatures()):
+
+            if progress.wasCanceled():
+                print("⛔ Anulowano przez użytkownika")
+                break
+
+            if i % 10 == 0:
+                elapsed = time.time() - start_time
+                eta = (elapsed / max(i, 1)) * (n_dzialek - i)
+                progress.setLabelText(
+                    f"Analiza PBC per działka\n"
+                    f"{i} / {n_dzialek}  |  ETA: {eta/60:.1f} min"
+                )
+                progress.setValue(i)
+                QApplication.processEvents()
+
+            if i % 100 == 0 and i > 0:
+                elapsed = time.time() - start_time
+                eta = (elapsed / i) * (n_dzialek - i)
+                print(f"  [{i}/{n_dzialek}] "
+                      f"elapsed: {elapsed/60:.1f} min | "
+                      f"ETA: {eta/60:.1f} min | "
+                      f"PBC>0: {len(pbc_dict)}")
+
+            geom_dzialki = dzialka.geometry()
+            if not geom_dzialki or geom_dzialki.isEmpty():
+                continue
+
+            # --- Zbierz heksagony PBC w obrębie działki ---
+            hex_geoms = []
+
+            for src in all_hex_sources:
+                bbox = geom_dzialki.boundingBox()
+                candidate_ids = src['index'].intersects(bbox)
+                if not candidate_ids:
+                    continue
+
+                request = QgsFeatureRequest().setFilterFids(candidate_ids)
+                if src['filter']:
+                    request.setFilterExpression(src['filter'])
+
+                for feat in src['layer'].getFeatures(request):
+                    geom_hex = feat.geometry()
+                    if not geom_hex or not geom_dzialki.intersects(geom_hex):
+                        continue
+                    clipped = geom_hex.intersection(geom_dzialki)
+                    if clipped and not clipped.isEmpty():
+                        hex_geoms.append(clipped)
+
+            # --- Oblicz PBC ---
+            if hex_geoms:
+                union = QgsGeometry.unaryUnion(hex_geoms)
+                pbc_area = round(union.area(), 2) if union and not union.isEmpty() else 0.0
+            else:
+                pbc_area = 0.0
+                empty_dzialki += 1
+
+            updates[dzialka.id()] = {pbc_idx: pbc_area}
+            pbc_dict[dzialka.id()] = pbc_area
+
+        # === 6. Batch update działek ===
+        dzialki_layer.startEditing()
+        provider.changeAttributeValues(updates)
+        dzialki_layer.commitChanges()
+
+    finally:
+        iface.mapCanvas().setRenderFlag(True)
+        progress.close()
+
+    # === 7. Raport ===
+    total_time = time.time() - start_time
+    print("\n✅ Analiza PBC zakończona!")
+    print(f"   Działek przetworzonych : {n_dzialek}")
+    print(f"   Działek z PBC > 0      : {len(pbc_dict)}")
+    print(f"   Działek bez heksagonów : {empty_dzialki}")
+    print(f"   Czas                   : {total_time/60:.1f} min")
+
+    return pbc_dict
+
+
+
+
 # Funkcja pomocnicza do pobierania warstwy
 def get_layer_safe(layer_name):
     """Bezpiecznie pobiera warstwę z projektu"""
@@ -40,281 +265,6 @@ def get_layer_safe(layer_name):
         print(f"OSTRZEŻENIE: Warstwa '{layer_name}' nie została znaleziona")
         return None
 
-
-def analiza_pbc_punktow_smart(punkty_name, dzialki_name):
-    """
-    Inteligentna analiza - wybiera najlepszą metodę automatycznie
-    """
-    
-    # Sprawdź czy warstwa jest w PostGIS
-    punkty_layer = QgsProject.instance().mapLayersByName(punkty_name)[0]
-    
-    if punkty_layer.dataProvider().name() == 'postgres':
-        print("🚀 Wykryto PostGIS - używam szybkiej metody SQL")
-        return analiza_pbc_postgis(punkty_name, dzialki_name)
-    else:
-        # Sprawdź liczbę punktów
-        count = punkty_layer.featureCount()
-        
-        if count > 500000:
-            print(f"⚠️ Duża liczba punktów ({count}). Rozważ użycie PostGIS dla lepszej wydajności.")
-            print("📖 Zobacz dokumentację jak skonfigurować PostGIS")
-        
-        print("💻 Używam standardowej metody QGIS")
-        return analiza_pbc_punktow_optimized_v3(punkty_name, dzialki_name)
-
-
-def analiza_pbc_postgis(punkty_name, dzialki_name):
-    """Szybka metoda dla warstw PostGIS"""
-    punkty_layer = QgsProject.instance().mapLayersByName(punkty_name)[0]
-    dzialki_layer = QgsProject.instance().mapLayersByName(dzialki_name)[0]
-    
-    # Pobierz nazwę tabeli i schemat
-    uri = QgsDataSourceUri(punkty_layer.source())
-    schema_punkty = uri.schema()
-    table_punkty = uri.table()
-    
-    uri_dzialki = QgsDataSourceUri(dzialki_layer.source())
-    schema_dzialki = uri_dzialki.schema()
-    table_dzialki = uri_dzialki.table()
-    
-    # SQL wykonujący całą analizę w bazie
-    sql = f"""
-    -- Utwórz tymczasową tabelę z buforami
-    DROP TABLE IF EXISTS temp_pbc_bufory;
-    CREATE TEMP TABLE temp_pbc_bufory AS
-    WITH punkty_filtered AS (
-        SELECT geom, "ID_DZIALKI"
-        FROM "{schema_punkty}"."{table_punkty}"
-    WHERE 
-        ("predicted_label" = '0.0' OR 
-         "predicted_label"::text = '0' OR 
-         "predicted_label"::text = '0.0' OR 
-         "predicted_label"::double precision = 0)          
-        AND "ID_DZIALKI" IS NOT NULL
-        ),
-    bufory_agregowane AS (
-        SELECT 
-            "ID_DZIALKI",
-            ST_Union(ST_Buffer(geom, 0.25, 5)) as geom
-        FROM punkty_filtered
-        GROUP BY "ID_DZIALKI"
-    )
-    SELECT 
-        "ID_DZIALKI",
-        ROUND(ST_Area(geom)::numeric, 2) as "PBC",
-        geom
-    FROM bufory_agregowane;
-    
-    -- Dodaj pole PBC jeśli nie istnieje
-    ALTER TABLE "{schema_dzialki}"."{table_dzialki}" 
-    ADD COLUMN IF NOT EXISTS "PBC" double precision;
-    
-    -- Zaktualizuj działki
-    UPDATE "{schema_dzialki}"."{table_dzialki}" d
-    SET "PBC" = COALESCE(b."PBC", 0)
-    FROM temp_pbc_bufory b
-    WHERE d."ID_DZIALKI" = b."ID_DZIALKI";
-    """
-    
-    # Wykonaj SQL
-    try:
-        # Wykonaj przez connection
-        import psycopg2
-        conn = psycopg2.connect(
-            host=uri.host(),
-            port=uri.port(),
-            database=uri.database(),
-            user=uri.username(),
-            password=uri.password()
-        )
-        cursor = conn.cursor()
-        cursor.execute(sql)
-        conn.commit()
-        cursor.close()
-        conn.close()
-        
-        print("✅ Analiza zakończona w PostGIS!")
-        return True
-        
-    except Exception as e:
-        print(f"❌ Błąd PostGIS: {e}")
-        print("Przechodzę na metodę standardową...")
-        return analiza_pbc_punktow_optimized_v3(punkty_name, dzialki_name)
-
-
-def analiza_pbc_punktow_optimized_v3(punkty_name, dzialki_name):
-    """
-    POPRAWIONA wersja - dissolve osobno dla każdej działki
-    """    
-    start_time = time.time()
-    
-    # Bezpieczne pobranie warstw z walidacją
-    punkty_layers = QgsProject.instance().mapLayersByName(punkty_name)
-    dzialki_layers = QgsProject.instance().mapLayersByName(dzialki_name)
-    
-    if not punkty_layers:
-        raise ValueError(f"Nie znaleziono warstwy: {punkty_name}")
-    if not dzialki_layers:
-        raise ValueError(f"Nie znaleziono warstwy: {dzialki_name}")
-    
-    # Jeśli jest wiele warstw o tej samej nazwie, weź tę z największą liczbą obiektów
-    punkty_layer = max(punkty_layers, key=lambda l: l.featureCount())
-    dzialki_layer = max(dzialki_layers, key=lambda l: l.featureCount())
-    
-    total_points = punkty_layer.featureCount()
-    
-    if total_points == 0:
-        raise ValueError(f"Warstwa {punkty_name} jest pusta!")
-    
-    from qgis.utils import iface
-    from PyQt5.QtWidgets import QProgressDialog
-    from PyQt5.QtCore import Qt
-    
-    progress = QProgressDialog(
-        f"Analiza PBC: {total_points:,} punktów\nTo może potrwać kilka minut...",
-        "Anuluj", 0, 100, iface.mainWindow()
-    )
-    progress.setWindowTitle("Analiza PBC")
-    progress.setWindowModality(Qt.WindowModal)
-    progress.setValue(0)
-    
-    try:
-        iface.mapCanvas().setRenderFlag(False)
-        
-        context = QgsProcessingContext()
-        context.setInvalidGeometryCheck(QgsFeatureRequest.GeometryNoCheck)
-        
-        # 1. Filtrowanie
-        progress.setLabelText("Krok 1/5: Filtrowanie punktów...")
-        progress.setValue(10)
-        
-        # Proste wyrażenie dla wartości numerycznych 0 lub 0.0
-        punkty_filtered = processing.run("native:extractbyexpression", {
-            'INPUT': punkty_layer,
-            'EXPRESSION': '"predicted_label" = 0',
-            'OUTPUT': 'memory:'
-        })['OUTPUT']
-        
-        filtered_count = punkty_filtered.featureCount()
-        print(f"✅ Przefiltrowano: {filtered_count:,} punktów z {total_points:,}")
-        
-        if filtered_count == 0:
-            raise ValueError("Filtrowanie nie zwróciło żadnych punktów! Sprawdź wartości w polu 'predicted_label'.")
-        
-        if progress.wasCanceled():
-            return None
-        
-        # 2. JOIN z działkami
-        progress.setLabelText("Krok 2/5: Przypisywanie do działek...")
-        progress.setValue(20)
-        
-        punkty_z_id = processing.run("native:joinattributesbylocation", {
-            'INPUT': punkty_filtered,
-            'JOIN': dzialki_layer,
-            'JOIN_FIELDS': ['ID_DZIALKI'],
-            'METHOD': 0,
-            'PREDICATE': [5],
-            'DISCARD_NONMATCHING': True,
-            'PREFIX': '',
-            'OUTPUT': 'memory:'
-        }, context=context)['OUTPUT']
-        
-        if progress.wasCanceled():
-            return None
-        
-        # 3. Buffer (bez dissolve!)
-        progress.setLabelText("Krok 3/5: Tworzenie buforów...")
-        progress.setValue(35)
-        
-        bufory_all = processing.run("native:buffer", {
-            'INPUT': punkty_z_id,
-            'DISTANCE': 0.25,
-            'SEGMENTS': 5,
-            'DISSOLVE': False,  # Nie łączymy tutaj!
-            'OUTPUT': 'memory:'
-        }, context=context)['OUTPUT']
-        
-        if progress.wasCanceled():
-            return None
-        
-        # 4. KLUCZOWE: Dissolve Z GRUPOWANIEM po ID_DZIALKI
-        progress.setLabelText("Krok 4/5: Agregacja buforów per działka...")
-        progress.setValue(60)
-        
-        from qgis.core import Qgis
-        field_param = 'FIELD' if Qgis.QGIS_VERSION_INT >= 33600 else 'FIELD'
-        
-        # To agreguje bufory OSOBNO dla każdej działki!
-        bufory_final = processing.run("native:dissolve", {
-            'INPUT': bufory_all,
-            field_param: ['ID_DZIALKI'],  # ← KLUCZOWE!
-            'OUTPUT': 'memory:'
-        }, context=context)['OUTPUT']
-        
-        if progress.wasCanceled():
-            return None
-        
-        print(f"✅ Utworzono {bufory_final.featureCount()} zagregowanych poligonów")
-        
-        # 5. Oblicz PBC i zaktualizuj działki
-        progress.setLabelText("Krok 5/5: Aktualizacja działek...")
-        progress.setValue(80)
-        
-        # Dodaj pole
-        dzialki_provider = dzialki_layer.dataProvider()
-        field_names = [f.name() for f in dzialki_layer.fields()]
-        
-        if 'PBC' not in field_names:
-            dzialki_provider.addAttributes([
-                QgsField('PBC', QVariant.Double, len=10, prec=2)
-            ])
-            dzialki_layer.updateFields()
-        
-        # Słownik z wartościami PBC
-        pbc_dict = {}
-        for feat in bufory_final.getFeatures():
-            id_dzialki = feat['ID_DZIALKI']
-            if id_dzialki:
-                pbc_dict[id_dzialki] = round(feat.geometry().area(), 2)
-        
-        # Aktualizacja wsadowa
-        dzialki_layer.startEditing()
-        pbc_idx = dzialki_layer.fields().indexOf('PBC')
-        updates = {}
-        
-        for feat in dzialki_layer.getFeatures():
-            updates[feat.id()] = {
-                pbc_idx: pbc_dict.get(feat['ID_DZIALKI'], 0.0)
-            }
-        
-        dzialki_layer.dataProvider().changeAttributeValues(updates)
-        dzialki_layer.commitChanges()
-        
-        # Dodaj warstwę bufory
-        QgsProject.instance().addMapLayer(bufory_final)
-        bufory_final.setName('PBC_bufory_agregowane')
-        
-        progress.setValue(100)
-        
-        total_time = time.time() - start_time
-        
-        from PyQt5.QtWidgets import QMessageBox
-        QMessageBox.information(
-            iface.mainWindow(),
-            "Analiza zakończona",
-            f"✅ Analiza PBC zakończona pomyślnie!\n\n"
-            f"📊 Przetworzono: {total_points:,} punktów\n"
-            f"📊 Utworzono: {bufory_final.featureCount()} poligonów PBC\n"
-            f"📊 Zaktualizowano: {len(pbc_dict)} działek\n"
-            f"⏱️ Czas: {total_time/60:.1f} min"
-        )
-        
-        return bufory_final
-        
-    finally:
-        iface.mapCanvas().setRenderFlag(True)
-        progress.close()
 
 
 def apply_qml_style_to_layer(layer, qml_file_path=None, show_messages=True):
@@ -706,181 +656,24 @@ def oblicz_wskazniki_dzialek(dzialki_layer_name, new_layer_name):
                              show_messages=True)
 
 
-def przytnij_punkty_pbc_do_maski(nazwa_warstwy_maski):
-    """
-    Przycina warstwę punktową 'scalone_punkty_PBC' do warstwy-maski.
-    
-    Parametry:
-    ----------
-    nazwa_warstwy_maski : str
-        Nazwa warstwy wektorowej, która będzie używana jako maska
-    
-    Zwraca:
-    -------
-    QgsVectorLayer lub None
-        Przycięta warstwa punktowa lub None w przypadku błędu
-    """
-    
-    # Pobranie warstwy źródłowej
-    warstwa_punktowa = QgsProject.instance().mapLayersByName('scalone_punkty_PBC')
-    
-    if not warstwa_punktowa:
-        print("Błąd: Nie znaleziono warstwy 'scalone_punkty_PBC'")
-        return None
-    
-    warstwa_punktowa = warstwa_punktowa[0]
-    
-    # Pobranie warstwy maski
-    warstwa_maski = QgsProject.instance().mapLayersByName(nazwa_warstwy_maski)
-    
-    if not warstwa_maski:
-        print(f"Błąd: Nie znaleziono warstwy '{nazwa_warstwy_maski}'")
-        return None
-    
-    warstwa_maski = warstwa_maski[0]
-    
-    # Parametry algorytmu clip
-    parametry = {
-        'INPUT': warstwa_punktowa,
-        'OVERLAY': warstwa_maski,
-        'OUTPUT': 'memory:'  # Wynik w pamięci, można zmienić na ścieżkę do pliku
-    }
-    
-    # Wykonanie algorytmu clip
-    try:
-        wynik = processing.run("native:clip", parametry)
-        warstwa_wynikowa = wynik['OUTPUT']
-        
-        # Nadanie własnej nazwy warstwie
-        warstwa_wynikowa.setName(f'scalone_punkty_PBC_przyciete_{nazwa_warstwy_maski}')
-        
-        # Dodanie warstwy do projektu
-        QgsProject.instance().addMapLayer(warstwa_wynikowa)
-        
-        print(f"Pomyślnie przycięto warstwę do maski '{nazwa_warstwy_maski}'")
-        return warstwa_wynikowa
-        
-    except Exception as e:
-        print(f"Błąd podczas przycinania: {str(e)}")
-        return None
 
 
 
 
-def prepare_punkty_pbc():
-    # Pobierz warstwy z projektu QGIS
-    print("\nPobieranie warstw Classification...")
-    classification_layers = []
-    layer_names = ['Classification_3', 'Classification_4', 'Classification_5', 'Classification_9']
-    
-    for name in layer_names:
-        layer = get_layer_safe(name)
-        if layer:
-            classification_layers.append(layer)
-            print(f"  ✓ {name} - znaleziono ({layer.featureCount()} obiektów)")
-        else:
-            print(f"  ✗ {name} - brak warstwy")
-    
-    # Sprawdź czy są jakieś warstwy do scalenia
-    if not classification_layers:
-        print("BŁĄD: Nie znaleziono żadnej warstwy Classification do scalenia!")
-        raise Exception("Brak warstw Classification w projekcie")
-    
-    print(f"\nZnaleziono {len(classification_layers)} warstw do scalenia")
-    
-    # Krok 1: Scal znalezione warstwy Classification
-    print("\nScalanie warstw Classification...")
-    merged_layer = processing.run("native:mergevectorlayers", {
-        'LAYERS': classification_layers,
-        'CRS': project_crs,
-        'OUTPUT': QgsProcessing.TEMPORARY_OUTPUT
-    })['OUTPUT']
-    
-    print(f"Scalono {merged_layer.featureCount()} obiektów")
-    
-    # Krok 2: Dodaj kolumnę 'predicted_label' i wypełnij wartością 0
-    print("\nDodawanie kolumny 'predicted_label'...")
-    merged_with_field = processing.run("native:fieldcalculator", {
-        'INPUT': merged_layer,
-        'FIELD_NAME': 'predicted_label',
-        'FIELD_TYPE': 2,  # 1 = Integer, 2 = String
-        'FIELD_LENGTH': 10,
-        'FIELD_PRECISION': 0,
-        'FORMULA': "0.0",
-        'OUTPUT': QgsProcessing.TEMPORARY_OUTPUT
-    })['OUTPUT']
-    
-    print("Kolumna dodana i wypełniona wartością 0")
-    
-    # Krok 3: Pobierz warstwę 'punkty_pbc_wyniki_predykcji'
-    print("\nPobieranie warstwy 'punkty_pbc_wyniki_predykcji'...")
-    punkty_pbc_dzialki = get_layer_safe('punkty_pbc_wyniki_predykcji')
-    
-    if not punkty_pbc_dzialki:
-        print("BŁĄD: Nie znaleziono warstwy 'punkty_pbc_wyniki_predykcji'!")
-        raise Exception("Brak warstwy 'punkty_pbc_wyniki_predykcji' w projekcie")
-    
-    print(f"  ✓ punkty_pbc_wyniki_predykcji - znaleziono ({punkty_pbc_dzialki.featureCount()} obiektów)")
-    
-    # Krok 4: Pobierz warstwę 'punkty_pbc_wyniki_predykcji_teren_inwestycji'
-    print("\nPobieranie warstwy 'punkty_pbc_wyniki_predykcji_teren_inwestycji'...")
-    
-    
-        # raise Exception("Brak warstwy 'punkty_pbc_wyniki_predykcji_teren_inwestycji' w projekcie")
-    
-    
-    # Krok 5: Złącz warstwę 'punkty_pbc_wyniki_predykcji' i 'punkty_pbc_wyniki_predykcji_teren_inwestycji'
-    try:
-        punkty_pbc_teren = get_layer_safe('punkty_pbc_wyniki_predykcji_teren_inwestycji')
-        print(f"  ✓ punkty_pbc_wyniki_predykcji_teren_inwestycji - znaleziono ({punkty_pbc_teren.featureCount()} obiektów)")
-    
-        print("\nŁączenie warstw 'punkty_pbc_wyniki_predykcji'...")
-        merged_pbc = processing.run("native:mergevectorlayers", {
-            'LAYERS': [punkty_pbc_dzialki, punkty_pbc_teren],
-            'CRS': project_crs,
-            'OUTPUT': QgsProcessing.TEMPORARY_OUTPUT
-        })['OUTPUT']
-    except:
-        merged_pbc = punkty_pbc_dzialki
-    if not punkty_pbc_teren:
-        print("BŁĄD: Nie znaleziono warstwy 'punkty_pbc_wyniki_predykcji_teren_inwestycji'!")
-    
 
-    
-    # Krok 6: Złącz warstwę wynikową i 'punkty_pbc'
-    print("\nŁączenie warstw wynikowych")
-    final_layer = processing.run("native:mergevectorlayers", {
-        'LAYERS': [merged_with_field, merged_pbc],
-        'CRS': project_crs,
-        'OUTPUT': 'memory:'
-    })['OUTPUT']
-    print(f"Warstwa finalna zawiera {final_layer.featureCount()} obiektów")
-    
-    # Dodaj wynikową warstwę do projektu
-    final_layer.setName('scalone_punkty_PBC')
-    QgsProject.instance().addMapLayer(final_layer)
-    # zapis_do_gpkg('scalone_punkty_PBC',remove_old=False)
-        
-    print("\n✓ Gotowe! Warstwa została dodana do projektu.")
+
 
 
 # OSZACOWANIE PBC    
-prepare_punkty_pbc()
-przytnij_punkty_pbc_do_maski('dzialki_zgodne_z_funkcja')     
-analiza_pbc_punktow_smart(punkty_name ='scalone_punkty_PBC_przyciete_dzialki_zgodne_z_funkcja',
-                    dzialki_name = 'dzialki_zgodne_z_funkcja'
-                    )
+analiza_pbc_per_dzialka('dzialki_zgodne_z_funkcja')
 # obliczanie wskaznikow
 oblicz_wskazniki_dzialek(dzialki_layer_name="dzialki_zgodne_z_funkcja", 
                          new_layer_name="dzialki_ze_wskaznikami")
 
 # to samo dla działki przedmiotowej
 try:
-    przytnij_punkty_pbc_do_maski('granica_terenu')     
-    
-    analiza_pbc_punktow_smart(punkty_name ='scalone_punkty_PBC_przyciete_granica_terenu',
-                        dzialki_name = 'granica_terenu'
-                        )
+    analiza_pbc_per_dzialka('granica_terenu')
+
     # obliczanie wskaznikow
     oblicz_wskazniki_dzialek(dzialki_layer_name="granica_terenu", 
                              new_layer_name="granica_terenu_wskazniki")

@@ -7,7 +7,7 @@ Kompletny poprawiony skrypt QGIS
 - Automatyczna klasyfikacja warstwy punktowej (bez potrzeby ręcznego "Klasyfikuj")
 """
 import processing
-from qgis.core import (QgsProject, QgsVectorLayer, QgsFeature, QgsWkbTypes,
+from qgis.core import (QgsProject, QgsVectorLayer, QgsFeature, QgsWkbTypes,QgsGradientColorRamp, QgsGradientStop,
     QgsFields, QgsField, QgsGraduatedSymbolRenderer, QgsRendererRange,QgsMarkerSymbol, 
     )
 from pathlib import Path
@@ -18,6 +18,7 @@ import numpy as np
 from sklearn.cluster import DBSCAN
 from sklearn.linear_model import RANSACRegressor
 from sklearn.preprocessing import StandardScaler
+from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
 from qgis.utils import iface
 import os
 import gc  # Garbage collector dla zarządzania pamięcią
@@ -32,125 +33,119 @@ BATCH_SIZE = 1000  # Rozmiar batcha dla przetwarzania
 
 def apply_optimized_point_classification(layer_name):
     """
-    Specjalna funkcja optymalizowana dla dużych chmur punktów.
-    Stosuje uproszczoną klasyfikację Fixed Interval która jest szybsza.
-    NIE WYMAGA otwierania właściwości warstwy i klikania "Klasyfikuj"!
+    Koloruje punkty dachów turbo, z normalizacją Z PER BUDYNEK — identycznie jak
+    rasteryzacja do modelu (formuła z build_dsm: podłoga zakresu 0.6 m, DATA_FLOOR 0.12).
+
+    Zamiast globalnego min/max po całym zbiorze: każdy budynek normalizowany osobno.
+    Dodaje pole Z_norm (= dokładnie wartość, którą koloruje turbo w rastrze) i ustawia
+    graduowany renderer turbo na [0,1]. Sygnatura, zapis QML i return jak w oryginale.
     """
     
+
     layers = QgsProject.instance().mapLayersByName(layer_name)
     if not layers:
         print(f"❌ Nie znaleziono warstwy: {layer_name}")
         return False
-    
     layer = layers[0]
-    field_name = 'Z'
-    
-    print(f"⚡ Stosuję szybką klasyfikację dla {layer.featureCount()} punktów...")
-    
-    # === SZYBKA METODA: Oblicz przedziały bez iteracji po wszystkich punktach ===
-    # Użyj statystyk warstwy (znacznie szybsze dla dużych zbiorów)
-    
-    idx = layer.fields().indexFromName(field_name)
-    if idx == -1:
-        print(f"❌ Nie znaleziono pola {field_name}")
-        return False
-    
-    # Pobierz statystyki bezpośrednio z providera (bardzo szybkie!)
-    
-    # Szybkie pobranie min/max poprzez sampling
-    sample_size = min(10000, layer.featureCount())
-    sample_step = max(1, layer.featureCount() // sample_size)
-    
-    values = []
-    counter = 0
-    for feature in layer.getFeatures():
-        if counter % sample_step == 0:
-            val = feature.attributes()[idx]
-            if val is not None:
-                values.append(float(val))
-        counter += 1
-        if len(values) >= sample_size:
-            break
-    
-    if not values:
-        print("❌ Nie można pobrać wartości Z")
-        return False
-    
-    min_val = min(values)
-    max_val = max(values)
-    
-    print(f"📈 Zakres Z: {min_val:.2f} - {max_val:.2f} m")
-    
-    # === Utwórz przedziały Fixed Interval (równe) ===
-    num_classes = 10
-    interval = (max_val - min_val) / num_classes
-        
-       # Kolory: gradient w odcieniach szarości (jasny -> ciemny)
-    colors = [
-        QColor(245, 245, 245),  # bardzo jasny szary
-        QColor(220, 220, 220),  # jasny szary
-        QColor(200, 200, 200),  # jasny średni
-        QColor(180, 180, 180),  # średni szary
-        QColor(160, 160, 160),  # neutralny szary
-        QColor(130, 130, 130),  # ciemny średni
-        QColor(100, 100, 100),  # ciemny szary
-        QColor(70, 70, 70),     # bardzo ciemny szary
-        QColor(45, 45, 45),     # near-black
-        QColor(20, 20, 20)      # almost black
-    ]
 
-    
-    # Utwórz przedziały
+    field_name, id_field = 'Z', 'ID_BUDYNKU'
+    fi = layer.fields().indexFromName(field_name)
+    bi = layer.fields().indexFromName(id_field)
+    if fi == -1 or bi == -1:
+        print(f"❌ Wymagane pola '{field_name}' i '{id_field}' "
+              f"(Z={fi != -1}, ID_BUDYNKU={bi != -1})")
+        return False
+
+    print(f"⚡ Normalizacja Z per budynek dla {layer.featureCount()} punktów...")
+
+    # 1) min/max Z per budynek — jeden przebieg O(n)
+    zmin, zmax = {}, {}
+    for f in layer.getFeatures():
+        attrs = f.attributes()
+        b, z = attrs[bi], attrs[fi]
+        if z is None:
+            continue
+        z = float(z)
+        if b not in zmin or z < zmin[b]:
+            zmin[b] = z
+        if b not in zmax or z > zmax[b]:
+            zmax[b] = z
+    if not zmin:
+        print("❌ Brak wartości Z")
+        return False
+
+    # 2) pole Z_norm (dodaj jeśli nie istnieje)
+    if layer.fields().indexFromName('Z_norm') == -1:
+        layer.dataProvider().addAttributes([QgsField('Z_norm', QVariant.Double)])
+        layer.updateFields()
+    ni = layer.fields().indexFromName('Z_norm')
+
+    # 3) policz Z_norm (formuła build_dsm) i zapisz hurtowo (szybciej niż per-feature)
+    DATA_FLOOR, MIN_RANGE = 0.12, 0.6
+    updates = {}
+    for f in layer.getFeatures():
+        attrs = f.attributes()
+        b, z = attrs[bi], attrs[fi]
+        if z is None or b not in zmin:
+            continue
+        rng = max(zmax[b] - zmin[b], MIN_RANGE)
+        v = DATA_FLOOR + (1 - DATA_FLOOR) * min(max((float(z) - zmin[b]) / rng, 0.0), 1.0)
+        updates[f.id()] = {ni: float(v)}
+    layer.dataProvider().changeAttributeValues(updates)
+    layer.updateFields()
+    print(f"✓ Z_norm policzone dla {len(updates)} punktów")
+
+    # 4) rampa turbo — dokładnie matplotlib turbo (jak w rasterze); fallback gdyby brakło mpl
+    def turbo_ramp(n=32):
+        def qc(r, g, b):
+            return QColor(int(r * 255), int(g * 255), int(b * 255))
+        try:
+            import matplotlib
+            cmap = matplotlib.colormaps['turbo']
+            stops = [QgsGradientStop(k / n, qc(*cmap(k / n)[:3])) for k in range(1, n)]
+            return QgsGradientColorRamp(qc(*cmap(0.0)[:3]), qc(*cmap(1.0)[:3]), False, stops)
+        except Exception:
+            hexes = ['#30123b', '#4145ab', '#4675ed', '#39a2fc', '#1bcfd4', '#24eca6',
+                     '#61fc6c', '#a4fc3b', '#d1e834', '#f3c63a', '#fe9b2d', '#f36315',
+                     '#cb2a04', '#7a0403']
+            cols = [QColor(h) for h in hexes]
+            stops = [QgsGradientStop(i / (len(cols) - 1), cols[i]) for i in range(1, len(cols) - 1)]
+            return QgsGradientColorRamp(cols[0], cols[-1], False, stops)
+
+    ramp = turbo_ramp()
+
+    # 5) graduowany renderer na Z_norm w STAŁYM [0,1] (Z_norm = pozycja w turbo,
+    #    więc punkt o Z_norm=v dostaje turbo(v) — dokładnie jak piksel rastra)
+    num_classes = 32   # zwiększ dla gładszego przejścia
     ranges = []
     for i in range(num_classes):
-        lower = min_val + (i * interval)
-        upper = min_val + ((i + 1) * interval)
-        
-        # Ostatni przedział - upewnij się że zawiera max
-        if i == num_classes - 1:
-            upper = max_val + 0.01
-        
-        # Symbol
-        color_idx = min(i, len(colors) - 1)
-        symbol = QgsMarkerSymbol.createSimple({
+        lo, hi = i / num_classes, (i + 1) / num_classes
+        col = ramp.color((i + 0.5) / num_classes)
+        sym = QgsMarkerSymbol.createSimple({
             'name': 'circle',
-            'color': colors[color_idx].name(),
+            'color': col.name(),
             'outline_style': 'no',
-            'size': '2'  # Małe punkty dla wydajności
+            'size': '2',
         })
-        
-        # Etykieta
-        label = f'{lower:.1f} - {upper:.1f} m'
-        
-        # Dodaj przedział
-        range_item = QgsRendererRange(lower, upper, symbol, label)
-        ranges.append(range_item)
-    
-    # Utwórz renderer
-    renderer = QgsGraduatedSymbolRenderer(field_name, ranges)
-    renderer.setClassAttribute(field_name)
-    
-    # Format liczb w legendzie
-    # renderer.setLabelFormat("%.1f")
-    
-    # Zastosuj
+        ranges.append(QgsRendererRange(lo, hi, sym, f"{lo:.2f}–{hi:.2f}"))
+
+    renderer = QgsGraduatedSymbolRenderer('Z_norm', ranges)
+    renderer.setClassAttribute('Z_norm')
     layer.setRenderer(renderer)
     layer.triggerRepaint()
-    
-    print(f"✅ Klasyfikacja zastosowana! ({num_classes} klas)")
-    
-    # Zapisz styl
+    print(f"✅ Pokolorowano turbo (per budynek, {num_classes} klas)")
+
+    # 6) zapis stylu (ta sama nazwa pliku co w oryginale)
     try:
         project_path = QgsProject.instance().fileName()
         if project_path:
             from pathlib import Path
-            project_dir = Path(project_path).parent
-            style_path = project_dir / f"{layer_name}_auto_graduated.qml"
+            style_path = Path(project_path).parent / f"{layer_name}_auto_graduated.qml"
             layer.saveNamedStyle(str(style_path))
             print(f"💾 Styl zapisany: {style_path}")
     except Exception as e:
         print(f"⚠️ Zapisywanie stylu: {e}")
-    
+
     return True
 
 
@@ -686,222 +681,410 @@ def process_buildings_roof_slopes(points_layer):
     print(f"✅ Analiza zakończona! Przetworzono {processed} budynków")
 
 
-def filter_outliers_iqr(data, multiplier=1.5):
-    """Filtruje outliery używając metody IQR"""
-    if len(data) < 4:
-        return data
-    
-    q1 = np.percentile(data, 25)
-    q3 = np.percentile(data, 75)
-    iqr = q3 - q1
-    
-    lower_bound = q1 - multiplier * iqr
-    upper_bound = q3 + multiplier * iqr
-    
-    filtered_data = [x for x in data if lower_bound <= x <= upper_bound]
-    
-    if len(filtered_data) < max(3, len(data) * 0.3):
-        return data
-    
-    return filtered_data
+# =====================================================================
+# FUNKCJE OBLICZANIA WYSOKOŚCI BUDYNKÓW (v2 – interpolacja DTM)
+# =====================================================================
+# Zamiast:  mean(dach) − mean(grunt_per_działka)
+# Teraz:    interpolacja TIN z gruntu → per-point subtraction → filtracja
+#           kominów/anten → wyznaczenie kalenicy
+# =====================================================================
 
 
-def calculate_roof_height(roof_points):
-    """Oblicza reprezentatywną wysokość dachu z filtrowaniem outlierów"""
-    if not roof_points or len(roof_points) == 0:
-        return 0
-    
-    filtered_points = filter_outliers_iqr(roof_points, multiplier=1.5)
-    
-    if len(filtered_points) > 20:
-        sorted_points = sorted(filtered_points, reverse=True)
-        percentile_70 = int(len(sorted_points) * 0.05)
-        percentile_95 = int(len(sorted_points) * 0.30)
-        selected_points = sorted_points[percentile_70:percentile_95]
-        
-        if len(selected_points) > 0:
-            return np.mean(selected_points)
-    
-    return np.mean(filtered_points)
+def interpolate_ground_surface(ground_xy, ground_z, query_xy):
+    """
+    Buduje NMT (TIN) z punktów gruntu i interpoluje wysokość terenu
+    w lokalizacjach query_xy (= punkty dachu).
+
+    Używa triangulacji Delaunay + interpolacji liniowej – identycznie
+    jak przy tworzeniu numerycznego modelu terenu.
+    Punkty poza convex hull triangulacji uzupełnia nearest-neighbor.
+    """
+    if len(ground_xy) < 3:
+        if len(ground_xy) == 0:
+            return np.full(len(query_xy), np.nan)
+        interp = NearestNDInterpolator(ground_xy, ground_z)
+        return interp(query_xy)
+
+    interp_linear = LinearNDInterpolator(ground_xy, ground_z)
+    result = interp_linear(query_xy)
+
+    nan_mask = np.isnan(result)
+    if np.any(nan_mask):
+        interp_nearest = NearestNDInterpolator(ground_xy, ground_z)
+        result[nan_mask] = interp_nearest(query_xy[nan_mask])
+
+    return result
 
 
-def calculate_ground_height(ground_points):
-    """Oblicza reprezentatywną wysokość gruntu z filtrowaniem outlierów"""
-    if not ground_points or len(ground_points) == 0:
-        return 0
-    
-    filtered_points = filter_outliers_iqr(ground_points, multiplier=1.5)
-    return np.mean(filtered_points)
+def remove_superstructure_outliers(heights, gap_factor=3.0,
+                                    min_gap_meters=1.5):
+    """
+    Usuwa kominy, anteny i inne nadbudówki z tablicy wysokości budynku.
+
+    METODA: Detekcja gapów (przerw) w posortowanym rozkładzie wysokości.
+
+    Kalenica dachu czterospadowego jest ciągłym przedłużeniem połaci –
+    przejście od połaci do kalenicy jest płynne, bez skoku.
+    Komin/antena natomiast tworzy wyraźną PRZERWĘ (gap) w rozkładzie:
+    jest grupa punktów dachu, potem przerwa, potem izolowane wysokie punkty.
+
+    Algorytm:
+    1. Sortuje wysokości malejąco
+    2. Oblicza różnice między kolejnymi wartościami (gaps)
+    3. Szuka gapów znacząco większych niż typowy gap
+       (> gap_factor × mediana gapów ORAZ > min_gap_meters)
+    4. Punkty powyżej pierwszego takiego gapu to nadbudówki → odrzuca
+    5. Jeśli nie ma żadnego dużego gapu → nic nie odrzuca
+
+    Dzięki temu kalenica (ciągła dystrybucja) zostaje zachowana,
+    a kominy (izolowane skoki) są odrzucane.
+    """
+    if len(heights) < 5:
+        return heights
+
+    sorted_h = np.sort(heights)[::-1]  # malejąco
+    gaps = np.abs(np.diff(sorted_h))   # różnice między kolejnymi
+
+    if len(gaps) == 0:
+        return heights
+
+    median_gap = np.median(gaps)
+    if median_gap < 0.001:
+        median_gap = 0.001  # zabezpieczenie przed dzieleniem przez 0
+
+    # Szukaj pierwszego gapu który jest:
+    #  - gap_factor × większy niż typowy gap (relatywny)
+    #  - ORAZ większy niż min_gap_meters (absolutny próg)
+    # Oba warunki łącznie zapobiegają fałszywym detekcjom
+    cut_idx = None
+    for i, g in enumerate(gaps):
+        if g > gap_factor * median_gap and g > min_gap_meters:
+            # Znaleziono gap – ale tylko jeśli powyżej gapu jest MAŁO punktów
+            # (< 15% ogółu). Jeśli dużo → to nie kominy, to zróżnicowany dach
+            n_above = i + 1  # ile punktów jest powyżej tego gapu
+            if n_above / len(heights) < 0.15:
+                cut_idx = i + 1
+                break
+
+    if cut_idx is None:
+        # Brak gapu → nic nie odrzucamy
+        return heights
+
+    # Próg odcięcia: wartość tuż poniżej gapu
+    threshold = sorted_h[cut_idx]
+    filtered = heights[heights <= sorted_h[cut_idx - 1]]
+    # Zachowaj punkty od progu w dół
+    filtered = heights[heights <= threshold + 0.01]
+
+    return filtered if len(filtered) >= 3 else heights
+
+
+def calculate_ridge_height(heights_clean):
+    """
+    Wyznacza wysokość głównej kalenicy z przefiltrowanych wysokości.
+
+    Po usunięciu kominów/anten najwyższe punkty w zbiorze SĄ kalenicą.
+    Bierzemy górne 5-15% punktów (percentyl 90-98) i liczymy ich średnią.
+
+    Dla dachów czterospadowych: po filtracji gap-based kalenica jest
+    zachowana, więc górne punkty to właśnie ona.
+    Dla dachów płaskich: górne punkty to po prostu najwyższa partia dachu.
+    """
+    if len(heights_clean) == 0:
+        return 0.0
+
+    if len(heights_clean) < 10:
+        return float(np.percentile(heights_clean, 95))
+
+    # Górne punkty = kalenica (po filtracji kominów nie ma nad nią nic)
+    p90 = np.percentile(heights_clean, 90)
+    p98 = np.percentile(heights_clean, 98)
+
+    ridge_points = heights_clean[(heights_clean >= p90) & (heights_clean <= p98)]
+
+    if len(ridge_points) < 3:
+        return float(np.percentile(heights_clean, 95))
+
+    return float(np.mean(ridge_points))
+
+
+def calculate_building_height_interpolated(roof_xy, roof_z,
+                                            ground_xy, ground_z):
+    """
+    Oblicza wysokość jednego budynku:
+    1. Interpoluje DTM pod każdym punktem dachu
+    2. Odejmuje punkt po punkcie
+    3. Filtruje kominy/anteny
+    4. Wyznacza kalenicę
+    """
+    empty = {
+        'wysokosc': 0.0, 'wysokosc_mediana': 0.0,
+        'n_roof': len(roof_z), 'n_ground': len(ground_z),
+        'n_outliers': 0, 'method': 'no_data'
+    }
+
+    if len(roof_z) < 3:
+        empty['method'] = 'insufficient_roof_points'
+        return empty
+
+    if len(ground_z) < 1:
+        empty['method'] = 'no_ground_points'
+        return empty
+
+    # Krok 1: interpolacja terenu
+    ground_z_interp = interpolate_ground_surface(ground_xy, ground_z, roof_xy)
+
+    valid = ~np.isnan(ground_z_interp)
+    if np.sum(valid) < 3:
+        per_point = roof_z - np.median(ground_z)
+        method = 'fallback_median_ground'
+    else:
+        per_point = roof_z[valid] - ground_z_interp[valid]
+        method = 'interpolated_dtm'
+
+    # Odrzuć ujemne (punkt dachu poniżej terenu = błąd danych)
+    per_point = per_point[per_point > 0.5]
+    if len(per_point) < 3:
+        empty['method'] = 'all_heights_invalid'
+        return empty
+
+    # Krok 2: filtracja kominów/anten
+    n_before = len(per_point)
+    clean = remove_superstructure_outliers(per_point)
+    n_outliers = n_before - len(clean)
+    if len(clean) < 3:
+        clean = per_point
+
+    # Krok 3: kalenica
+    ridge = calculate_ridge_height(clean)
+    med = float(np.median(clean))
+
+    return {
+        'wysokosc': round(ridge, 2),
+        'wysokosc_mediana': round(med, 2),
+        'n_roof': len(roof_z),
+        'n_ground': len(ground_z),
+        'n_outliers': n_outliers,
+        'method': method
+    }
 
 
 def add_height_to_buildings_layer():
-    """Główna funkcja dodająca kolumnę wysokość z optymalizacją pamięci"""
+    """
+    Główna funkcja – oblicza wysokości budynków z interpolacją DTM
+    i zapisuje do warstwy budynków.
+
+    Wymaga tych samych warstw wejściowych co stara wersja:
+    - 'budynki_z_szer_elew_front'          (poligony – cel)
+    - 'Classification_2_bufor_with_IDs'    (punkty gruntu)
+    - 'Classification_6_with_IDs'          (punkty dachów)
+    """
     try:
-        target_layer = QgsProject.instance().mapLayersByName('budynki_z_szer_elew_front')[0]
-        
-        field_names = [field.name() for field in target_layer.fields()]
-        
+        # === WARSTWA DOCELOWA ===
+        target_layer = QgsProject.instance().mapLayersByName(
+            'budynki_z_szer_elew_front')[0]
+
+        field_names = [f.name() for f in target_layer.fields()]
+        new_fields = []
         if 'wysokosc' not in field_names:
-            target_layer.dataProvider().addAttributes([QgsField('wysokosc', QVariant.Double)])
+            new_fields.append(QgsField('wysokosc', QVariant.Double))
+        if 'wys_mediana' not in field_names:
+            new_fields.append(QgsField('wys_mediana', QVariant.Double))
+        if 'wys_metoda' not in field_names:
+            new_fields.append(QgsField('wys_metoda', QVariant.String))
+        if 'wys_outliers' not in field_names:
+            new_fields.append(QgsField('wys_outliers', QVariant.Int))
+
+        if new_fields:
+            target_layer.dataProvider().addAttributes(new_fields)
             target_layer.updateFields()
-            print("Dodano kolumnę 'wysokosc' do warstwy")
+            print(f"Dodano {len(new_fields)} nowych kolumn do warstwy budynków")
         else:
-            print("Kolumna 'wysokosc' już istnieje - będzie aktualizowana")
-        
-        # Pobierz dane z warstwy gruntu partiami
+            print("Kolumny wysokości już istnieją – będą aktualizowane")
+
+        # === WARSTWA GRUNTU ===
         try:
-            ground_layer = QgsProject.instance().mapLayersByName('Classification_2_bufor_with_IDs')[0]
-            print(f"✅ Znaleziono warstwę gruntu: {ground_layer.name()}")
-            print(f"Liczba obiektów w warstwie gruntu: {ground_layer.featureCount()}")
+            ground_layer = QgsProject.instance().mapLayersByName(
+                'Classification_2_bufor_with_IDs')[0]
+            print(f"✅ Warstwa gruntu: {ground_layer.name()} "
+                  f"({ground_layer.featureCount()} pkt)")
         except IndexError:
-            print("❌ BŁĄD: Nie znaleziono warstwy 'Classification_2_bufor_with_IDs'")
+            print("❌ Nie znaleziono warstwy 'Classification_2_bufor_with_IDs'")
             return False
-        
-        ground_field_names = [field.name() for field in ground_layer.fields()]
-        print(f"Pola warstwy gruntu: {ground_field_names}")
-        
-        # OPTYMALIZACJA: Przetwarzanie partiami
+
+        ground_field_names = [f.name() for f in ground_layer.fields()]
+        ground_has_building_id = 'ID_BUDYNKU' in ground_field_names
+        ground_group_key = 'ID_BUDYNKU' if ground_has_building_id else 'ID_DZIALKI'
+        has_xy_fields = ('X' in ground_field_names and 'Y' in ground_field_names)
+
+        print(f"ℹ️  Grunt grupowany po: {ground_group_key}")
+        print(f"ℹ️  Grunt ma pola X/Y: {has_xy_fields}")
+
         ground_data = []
-        batch_counter = 0
-        
-        for feature in ground_layer.getFeatures():
-            attrs = feature.attributes()
-            fields = {field.name(): i for i, field in enumerate(ground_layer.fields())}
-            
-            if 'Z' not in fields or 'ID_DZIALKI' not in fields:
-                print("❌ BŁĄD: Brak wymaganych pól w warstwie gruntu")
-                return False
-            
-            z_value = attrs[fields['Z']] if attrs[fields['Z']] is not None else 0
-            id_dzialki = attrs[fields['ID_DZIALKI']] if attrs[fields['ID_DZIALKI']] is not None else ''
-            
+        for i, feat in enumerate(ground_layer.getFeatures()):
+            z = feat['Z']
+            grp = feat[ground_group_key]
+            if z is None or grp is None:
+                continue
+
+            if has_xy_fields:
+                x, y = feat['X'], feat['Y']
+            else:
+                pt = feat.geometry().asPoint()
+                x, y = pt.x(), pt.y()
+
             ground_data.append({
-                'Z': z_value,
-                'ID_DZIALKI': id_dzialki
+                'X': float(x), 'Y': float(y), 'Z': float(z),
+                'GROUP_KEY': str(grp)
             })
-            
-            batch_counter += 1
-            if batch_counter % 50000 == 0:
-                print(f"  Grunt: przetworzono {batch_counter} punktów...")
+            if (i + 1) % 50000 == 0:
+                print(f"  Grunt: wczytano {i + 1}...")
                 gc.collect()
-        
+
         ground_df = pd.DataFrame(ground_data)
         del ground_data
         gc.collect()
-        
         print(f"✅ Pobrano {len(ground_df)} punktów gruntu")
-        print(f"Zakres wysokości gruntu: {ground_df['Z'].min():.2f} - {ground_df['Z'].max():.2f}")
-        
-        # Pobierz dane z warstwy dachów partiami
+        print(f"   Zakres Z: {ground_df['Z'].min():.2f} – {ground_df['Z'].max():.2f}")
+
+        # === WARSTWA DACHÓW ===
         try:
-            roof_layer = QgsProject.instance().mapLayersByName('Classification_6_with_IDs')[0]
-            print(f"✅ Znaleziono warstwę dachów: {roof_layer.name()}")
-            print(f"Liczba obiektów w warstwie dachów: {roof_layer.featureCount()}")
+            roof_layer = QgsProject.instance().mapLayersByName(
+                'Classification_6_with_IDs')[0]
+            print(f"✅ Warstwa dachów: {roof_layer.name()} "
+                  f"({roof_layer.featureCount()} pkt)")
         except IndexError:
-            print("❌ BŁĄD: Nie znaleziono warstwy 'Classification_6_with_IDs'")
+            print("❌ Nie znaleziono warstwy 'Classification_6_with_IDs'")
             return False
-        
+
+        roof_field_names = [f.name() for f in roof_layer.fields()]
         roof_data = []
-        batch_counter = 0
-        
-        for feature in roof_layer.getFeatures():
-            attrs = feature.attributes()
-            fields = {field.name(): i for i, field in enumerate(roof_layer.fields())}
-            
-            if 'Z' not in fields or 'ID_DZIALKI' not in fields or 'ID_BUDYNKU' not in fields:
-                print("❌ BŁĄD: Brak wymaganych pól w warstwie dachów")
-                return False
-            
-            z_value = attrs[fields['Z']] if attrs[fields['Z']] is not None else 0
-            id_dzialki = attrs[fields['ID_DZIALKI']] if attrs[fields['ID_DZIALKI']] is not None else ''
-            id_budynku = attrs[fields['ID_BUDYNKU']] if attrs[fields['ID_BUDYNKU']] is not None else ''
-            
+        for i, feat in enumerate(roof_layer.getFeatures()):
+            z = feat['Z']
+            id_bud = feat['ID_BUDYNKU']
+            if z is None or id_bud is None:
+                continue
+
+            x = float(feat['X']) if 'X' in roof_field_names else feat.geometry().asPoint().x()
+            y = float(feat['Y']) if 'Y' in roof_field_names else feat.geometry().asPoint().y()
+            id_dz = feat['ID_DZIALKI'] if 'ID_DZIALKI' in roof_field_names else ''
+
             roof_data.append({
-                'Z': z_value,
-                'ID_DZIALKI': id_dzialki,
-                'ID_BUDYNKU': id_budynku
+                'X': x, 'Y': y, 'Z': float(z),
+                'ID_BUDYNKU': str(id_bud),
+                'ID_DZIALKI': str(id_dz) if id_dz else ''
             })
-            
-            batch_counter += 1
-            if batch_counter % 50000 == 0:
-                print(f"  Dachy: przetworzono {batch_counter} punktów...")
+            if (i + 1) % 50000 == 0:
+                print(f"  Dachy: wczytano {i + 1}...")
                 gc.collect()
-        
+
         roof_df = pd.DataFrame(roof_data)
         del roof_data
         gc.collect()
-        
         print(f"✅ Pobrano {len(roof_df)} punktów dachów")
-        print(f"Zakres wysokości dachów: {roof_df['Z'].min():.2f} - {roof_df['Z'].max():.2f}")
-        
-        # Oblicz wysokości
-        print("🔄 Obliczam wysokości gruntu...")
-        ground_heights = ground_df.groupby('ID_DZIALKI')['Z'].apply(list).reset_index()
-        ground_heights['Z_ground_mean'] = ground_heights['Z'].apply(calculate_ground_height)
-        ground_heights = ground_heights[['ID_DZIALKI', 'Z_ground_mean']]
-        
-        print("🔄 Obliczam wysokości dachów...")
-        roof_heights = roof_df.groupby('ID_BUDYNKU').agg({
-            'Z': list,
-            'ID_DZIALKI': 'first'
-        }).reset_index()
-        
-        roof_heights['Z_roof_mean'] = roof_heights['Z'].apply(calculate_roof_height)
-        
-        print("🔄 Łączę dane i obliczam wysokości budynków...")
-        buildings_heights = pd.merge(roof_heights, ground_heights, on='ID_DZIALKI', how='left')
-        
-        missing_ground = buildings_heights['Z_ground_mean'].isna().sum()
-        if missing_ground > 0:
-            print(f"⚠️ UWAGA: {missing_ground} budynków nie ma danych o gruncie")
-            ground_median = ground_df['Z'].median()
-            buildings_heights['Z_ground_mean'].fillna(ground_median, inplace=True)
-            print(f"Użyto mediany gruntu: {ground_median:.2f}")
-        
-        buildings_heights['wysokosc'] = round(
-            buildings_heights['Z_roof_mean'] - buildings_heights['Z_ground_mean'], 2
-        )
-        
-        height_dict = dict(zip(buildings_heights['ID_BUDYNKU'], buildings_heights['wysokosc']))
-        print(f"Utworzono słownik wysokości dla {len(height_dict)} budynków")
-        
-        # Aktualizuj warstwę docelową
-        target_layer.startEditing()
-        
-        height_field_idx = target_layer.fields().indexFromName('wysokosc')
-        id_field_idx = target_layer.fields().indexFromName('ID_BUDYNKU')
-        
-        if height_field_idx == -1 or id_field_idx == -1:
-            print("❌ BŁĄD: Nie znaleziono wymaganych pól w warstwie docelowej")
-            return False
-        
-        updated_count = 0
-        not_found_count = 0
-        
-        for feature in target_layer.getFeatures():
-            building_id = feature.attributes()[id_field_idx]
-            
-            if building_id in height_dict:
-                height_value = height_dict[building_id]
-                target_layer.changeAttributeValue(feature.id(), height_field_idx, height_value)
-                updated_count += 1
+        print(f"   Zakres Z: {roof_df['Z'].min():.2f} – {roof_df['Z'].max():.2f}")
+
+        # === OBLICZANIE WYSOKOŚCI PER BUDYNEK ===
+        print("\n🔄 Obliczam wysokości budynków (interpolacja DTM)...")
+
+        ground_groups = ground_df.groupby('GROUP_KEY')
+
+        # Lookup: budynek → klucz grupy gruntu
+        if not ground_has_building_id:
+            bud_to_group = dict(zip(roof_df['ID_BUDYNKU'], roof_df['ID_DZIALKI']))
+        else:
+            bud_to_group = None
+
+        roof_groups = roof_df.groupby('ID_BUDYNKU')
+        height_results = {}
+        processed = 0
+
+        for building_id, roof_grp in roof_groups:
+            r_xy = roof_grp[['X', 'Y']].values
+            r_z = roof_grp['Z'].values
+
+            gkey = building_id if ground_has_building_id else (
+                bud_to_group.get(building_id, ''))
+
+            if gkey in ground_groups.groups:
+                g_grp = ground_groups.get_group(gkey)
+                g_xy = g_grp[['X', 'Y']].values
+                g_z = g_grp['Z'].values
             else:
-                not_found_count += 1
-        
+                g_xy = np.empty((0, 2))
+                g_z = np.empty(0)
+
+            height_results[building_id] = calculate_building_height_interpolated(
+                r_xy, r_z, g_xy, g_z)
+
+            processed += 1
+            if processed % 20 == 0:
+                print(f"  ⏳ Przetworzono {processed} budynków...")
+                gc.collect()
+
+        print(f"✅ Obliczono wysokości dla {len(height_results)} budynków")
+
+        # Diagnostyka
+        methods = {}
+        for r in height_results.values():
+            m = r['method']
+            methods[m] = methods.get(m, 0) + 1
+        print("\n📊 Statystyki metod:")
+        for m, cnt in sorted(methods.items(), key=lambda x: -x[1]):
+            print(f"   {m}: {cnt}")
+
+        all_h = [r['wysokosc'] for r in height_results.values() if r['wysokosc'] > 0]
+        if all_h:
+            print("\n📏 Wysokości budynków:")
+            print(f"   min={min(all_h):.2f}  max={max(all_h):.2f}  "
+                  f"mediana={np.median(all_h):.2f}  średnia={np.mean(all_h):.2f}")
+
+        # === ZAPIS DO WARSTWY ===
+        target_layer.startEditing()
+
+        fld = {name: target_layer.fields().indexFromName(name)
+               for name in ['wysokosc', 'wys_mediana', 'wys_metoda',
+                            'wys_outliers', 'ID_BUDYNKU']}
+
+        if fld['wysokosc'] == -1 or fld['ID_BUDYNKU'] == -1:
+            print("❌ Brak wymaganych pól w warstwie docelowej")
+            return False
+
+        updated = 0
+        not_found = 0
+        for feat in target_layer.getFeatures():
+            bid = str(feat.attributes()[fld['ID_BUDYNKU']])
+            if bid in height_results:
+                r = height_results[bid]
+                target_layer.changeAttributeValue(
+                    feat.id(), fld['wysokosc'], r['wysokosc'])
+                if fld.get('wys_mediana', -1) != -1:
+                    target_layer.changeAttributeValue(
+                        feat.id(), fld['wys_mediana'], r['wysokosc_mediana'])
+                if fld.get('wys_metoda', -1) != -1:
+                    target_layer.changeAttributeValue(
+                        feat.id(), fld['wys_metoda'], r['method'])
+                if fld.get('wys_outliers', -1) != -1:
+                    target_layer.changeAttributeValue(
+                        feat.id(), fld['wys_outliers'], r['n_outliers'])
+                updated += 1
+            else:
+                not_found += 1
+
         target_layer.commitChanges()
-        
-        print(f"✅ Sukces! Zaktualizowano wysokość dla {updated_count} budynków")
-        print(f"⚠️ Nie znaleziono danych dla {not_found_count} budynków")
-        
+
+        print(f"\n✅ Sukces! Zaktualizowano wysokość dla {updated} budynków")
+        if not_found:
+            print(f"⚠️ Nie znaleziono danych dla {not_found} budynków")
+
         target_layer.triggerRepaint()
         iface.layerTreeView().refreshLayerSymbology(target_layer.id())
-        
-        # Czyszczenie pamięci
-        del ground_df, roof_df, buildings_heights, height_dict
+
+        del ground_df, roof_df, height_results
         gc.collect()
-        
+
         return True
-        
+
     except Exception as e:
         import traceback
         print(f"❌ Błąd podczas dodawania wysokości: {str(e)}")

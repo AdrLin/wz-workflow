@@ -1,89 +1,15 @@
-# ============================================
-# DUŻE PLIKI MODELI ML - DO GITHUB RELEASES!
-# ============================================
-ultimate_building_classifier_svm_*.pkl
-symbology-style.db
+# Modele ML — za duże dla gita, idą do GitHub Releases
+*.pkl
+*.h5
+*.keras
+*.pth
 
-# ============================================
-# PYTHON
-# ============================================
+# Artefakty buildu
+*.zip
+
+# Python
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-env/
-venv/
-ENV/
-*.egg
-*.egg-info/
-dist/
-build/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.manifest
-*.spec
-pip-log.txt
-pip-delete-this-directory.txt
+*.pyc
 
-# ============================================
-# QGIS
-# ============================================
-*.qgs~
-*.qgz~
-*.qgd
+# Stan roboczy wtyczki
 workflow_checkpoint.json
-
-# ============================================
-# DANE I WYNIKI (nie commitować)
-# ============================================
-ml_dataset/
-
-# ============================================
-# IDE i EDYTORY
-# ============================================
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.project
-.pydevproject
-.settings/
-
-# ============================================
-# SYSTEM OPERACYJNY
-# ============================================
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
-Desktop.ini
-
-# ============================================
-# GIT
-# ============================================
-*.orig
-
-# ============================================
-# TESTY I TYMCZASOWE
-# ============================================
-*.log
-*.tmp
-test_output/
-temp/
-
-# ============================================
-# DOKUMENTACJA (opcjonalnie - możesz commitować)
-# ============================================
-# docs/_build/
-*.backup
