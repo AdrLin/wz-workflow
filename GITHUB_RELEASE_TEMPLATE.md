@@ -4,10 +4,28 @@ Skopiuj i dostosuj przy tworzeniu Release na GitHubie.
 
 ---
 
-## WZ Workflow v2.0.0
+## WZ Workflow v2.1.0
 
-Duże wydanie: całkowicie przebudowany klasyfikator powierzchni biologicznie czynnej (PBC)
-oraz nowy model rozpoznawania kształtu dachów.
+Zgodnosc z Qt6 / QGIS 4 oraz utrwalenie zmian z serii 2.0.x.
+
+### 🔧 Zgodnosc z QGIS 4 (Qt6)
+
+- Importy PyQt przechodza przez warstwe zgodnosci `qgis.PyQt` (dziala na Qt5 i Qt6)
+- Wszystkie enumy Qt i QGIS w pelnej formie (wymagane przez PyQt6, poprawne w PyQt5)
+- `exec_()` zastapione przez `exec()`
+- **Brak zmian funkcjonalnych** — wtyczka nadal dziala na QGIS 3
+
+### 🔒 Bezpieczenstwo (z 2.0.1–2.0.3)
+
+- Skrypty krokow uruchamiane standardowym mechanizmem `runpy` zamiast `exec()`
+- Pobieranie modeli waliduje schemat i host URL, pobiera strumieniowo
+- Usunieta automatyczna instalacja pakietow przez powloke — brakujace zaleznosci
+  zglaszaja teraz czytelny komunikat
+
+---
+
+Wersja 2.0.0 wprowadzila przebudowany klasyfikator PBC (Random Forest)
+oraz nowy model rozpoznawania ksztaltu dachow (CNN).
 
 ### 🌿 Nowy klasyfikator PBC (Random Forest)
 
@@ -43,7 +61,7 @@ QGIS → Wtyczki → Zarządzaj wtyczkami → Wyszukaj "WZ Workflow" → Zainsta
 ```
 
 #### Ręczna instalacja
-1. Pobierz `wz_workflow-2.0.0.zip` (poniżej, w sekcji Assets)
+1. Pobierz `wz_workflow_plugin_for_REPO-2.1.0.zip` (poniżej, w sekcji Assets)
 2. W QGIS: **Wtyczki → Zarządzaj wtyczkami → Zainstaluj z ZIP**
 3. Wskaż pobrany plik
 
@@ -112,11 +130,16 @@ Adrian Linkowski
 
 ## ✅ Checklista Assets do dodania do Release
 
-1. `wz_workflow-2.0.0.zip` — wtyczka **BEZ modeli** (~2,3 MB)
-2. `rf_pbc_ostrow.pkl` — model PBC (~179 MB)
-3. `best_dachy_efficient.weights.h5` — model dachów (~39 MB)
+1. `wz_workflow_plugin_for_REPO-2.1.0.zip` — wtyczka **BEZ modeli** (~370 KB)
 
-**WAŻNE:** URL w `model_downloader.py` musi wskazywać na tag tego wydania:
+Modeli **NIE dodajesz ponownie** — sa juz w Release v2.0.0 i downloader z nich korzysta.
+NIE USUWAJ Release v2.0.0, bo wtyczka przestanie pobierac modele!
+
+**⚠️ UWAGA — modele zostaja pod tagiem v2.0.0:**
+
+Modele (`rf_pbc_ostrow.pkl`, `best_dachy_efficient.weights.h5`) sa juz opublikowane
+jako assety Release **v2.0.0** i sie NIE zmienily. `model_downloader.py` celowo
+nadal na nie wskazuje:
 
 ```python
 GITHUB_RELEASE_URL = "https://github.com/AdrLin/wz-workflow/releases/download/v2.0.0/"

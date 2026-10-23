@@ -1,9 +1,9 @@
 [general]
 name=WZ Workflow
 qgisMinimumVersion=3.0
-qgisMaximumVersion=3.99
+qgisMaximumVersion=4.99
 description=Comprehensive tool for Polish urban planning analysis (Building Permit Conditions - Warunki Zabudowy)
-version=2.0.0
+version=2.1.0
 author=Adrian Linkowski
 email=link.mapy@gmail.com
 
@@ -39,7 +39,59 @@ icon=icon.png
 
 experimental=False
 deprecated=False
-changelog=2.0.0
+changelog=2.1.0
+    NOWE FUNKCJE
+    - Obsluga planu ogolnego (APP 2.0): nowy modul odczytuje strefe planistyczna,
+      obszar uzupelnienia zabudowy (OUZ) i obszar zabudowy srodmiejskiej z warstw
+      planu, przecinajac je z granica terenu inwestycji (krok 13). Przy dzialce w
+      kilku strefach wybierana jest strefa o najwiekszym udziale powierzchniowym.
+      Dopasowanie warstw jest odporne na zmiane nazw. Nowe zmienne pog_* trafiaja
+      do szablonow Worda (krok 14); stare szablony dzialaja bez zmian dla spraw
+      wszczetych przed uchwaleniem planu.
+    - Narzedzia liczace z zaznaczenia na mapie: srednia wysokosc zabudowy oraz
+      inne parametry liczone wprost z zaznaczonych dzialek/budynkow.
+    - Parametry budynkow prezentowane jako listy wartosci zamiast usrednien.
+
+    POPRAWKI FUNKCJONALNE
+    - Pole sredniej wysokosci jest teraz dostepne zawsze (wczesniej aktywne tylko
+      przy wariancie z paragrafu 7 ust. 3).
+    - Okno bledu importu pokazuje prawdziwa przyczyne zamiast ogolnego komunikatu.
+    - Naprawiono blad formatowania wskaznikow WPZ/WPBC w oknie danych dzialki
+      (pola tekstowe z "%" powodowaly wyjatek przy formacie liczbowym).
+
+    ZGODNOSC Z QGIS 4 (Qt6) — przy zachowaniu pelnej zgodnosci z QGIS 3
+    - qgisMaximumVersion podniesiony do 4.99, aby wtyczka ladowala sie w QGIS 4.
+    - Importy PyQt ida przez warstwe zgodnosci qgis.PyQt.
+    - Wszystkie enumy Qt i QGIS w pelnej, kwalifikowanej formie (wymagane przez
+      PyQt6, poprawne takze w PyQt5); QDialogButtonBox przez StandardButton.
+    - QAction importowany z QtGui w Qt6, z QtWidgets w Qt5.
+    - Nowy modul qt_compat przywraca stale typow pol QVariant usuniete w Qt6,
+      jako wartosci liczbowe zgodne z PyQt5 (poprawny zapis pol double/int).
+    - Poziomy paska komunikatow przez Qgis.MessageLevel zamiast liczb.
+    - Sprawdzanie typu warstwy przez isinstance() zamiast porownania z liczba.
+    - sip importowany odpornie (samodzielny modul sip nie istnieje w Qt6).
+    - exec_() zastapione przez exec().
+    - pdal:filter przekazuje wymagany w QGIS 4 parametr VPC_OUTPUT_FORMAT
+      (ustawiany tylko gdy algorytm go ma, wiec QGIS 3 dziala bez zmian);
+      format posredni chmury wykrywany automatycznie z wejscia (LAS/LAZ/COPC).
+    - Wartosci parametrow budynkow rzutowane na natywne typy Pythona przed
+      zapisem (typy numpy byly odrzucane przez QGIS 4 jako PyQt_PyObject).
+    - Ciezkie biblioteki (pandas, numpy, scipy, scikit-learn) importowane leniwie:
+      wtyczka wstaje nawet bez nich i zglasza czytelny komunikat dopiero w kroku,
+      ktory ich wymaga.
+    - Windows: klasyfikator dachow uruchamiany prawdziwym interpreterem Pythona
+      zamiast qgis-bin.exe (ktory otwieral druga kopie QGIS i zawieszal workflow);
+      petla oczekiwania na wynik nie zawiesza juz GUI i konczy sie po limicie czasu.
+        2.0.3
+    - Removed automatic package installation via shell (os.system pip install); missing dependencies now raise a clear message
+    - Documented and hardened the subprocess call used to launch the roof classifier
+    - Replaced bare except clauses with explicit exception handling
+    2.0.2
+    - Updated Word templates
+    2.0.1
+    - Replaced exec() with the standard runpy mechanism for running workflow steps (security hardening)
+    - Model downloader now validates the URL scheme and host, and streams the download (security hardening)
+    2.0.0
     - Completely rebuilt PBC (biologically active surface) classifier: Random Forest replaces the previous SVM/MLP approach
     - New 13-class surface taxonomy reflecting real-world land cover encountered in WZ analyses
     - 28 engineered features including chromaticity, spectral ratio indices and neighbourhood geometry

@@ -1,7 +1,7 @@
 from qgis.core import (QgsVectorLayer, QgsField, QgsProject)
 from qgis.PyQt.QtCore import QVariant
 from qgis.utils import iface
-from PyQt5.QtWidgets import QMessageBox
+from qgis.PyQt.QtWidgets import QMessageBox
 
 
 def create_wymiary_layer():
@@ -56,7 +56,7 @@ def setup_auto_length_calculation(layer):
                 # Obliczanie długości geometrii
                 length = feature.geometry().length()
                 # Aktualizacja pola 'l'
-                layer.changeAttributeValue(feature_id, l_field_index, round(length))
+                layer.changeAttributeValue(feature_id, l_field_index, round(length,1))
     
     # Funkcja wywoływana po zmianie geometrii
     def on_geometry_changed(feature_id, geometry):
@@ -64,7 +64,7 @@ def setup_auto_length_calculation(layer):
             # Obliczanie nowej długości
             length = geometry.length()
             # Aktualizacja pola 'l'
-            layer.changeAttributeValue(feature_id, l_field_index, round(length))
+            layer.changeAttributeValue(feature_id, l_field_index, round(length,1))
     
     # Podłączanie sygnałów do automatycznego obliczania długości
     layer.featureAdded.connect(on_feature_added)

@@ -1,5 +1,5 @@
 import processing
-from PyQt5.QtCore import QVariant
+from qgis.PyQt.QtCore import QVariant
 from qgis.core import (
     QgsProject, QgsVectorLayer, QgsField, 
     QgsFields,QgsFeature,QgsWkbTypes
@@ -7,7 +7,7 @@ from qgis.core import (
 from qgis.utils import iface
 from pathlib import Path
 import os
-from PyQt5.QtWidgets import ( QMessageBox, QFileDialog
+from qgis.PyQt.QtWidgets import ( QMessageBox, QFileDialog
 )
 SCRIPTS_PATH = os.path.dirname(os.path.abspath(__file__))
 
@@ -369,7 +369,7 @@ def oblicz_wskazniki_dzialek():
             if geom_b and geom_b.intersects(geom_d):
                 czesc_wspolna = geom_b.intersection(geom_d)
                 if czesc_wspolna and czesc_wspolna.area() / geom_b.area() >= PROG_PROCENT:
-                    if QgsWkbTypes.geometryType(czesc_wspolna.wkbType()) == QgsWkbTypes.PolygonGeometry and czesc_wspolna.area() > 0:
+                    if QgsWkbTypes.geometryType(czesc_wspolna.wkbType()) == QgsWkbTypes.GeometryType.PolygonGeometry and czesc_wspolna.area() > 0:
                         pow = czesc_wspolna.area()
                         suma_pow_zabud += pow
                         liczba_kond = budynek["KONDYGNACJE_NADZIEMNE"] or 1

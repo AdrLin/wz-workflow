@@ -2,7 +2,7 @@ from pathlib import Path
 from qgis.core import QgsProject, QgsVectorFileWriter, QgsCoordinateTransformContext, QgsVectorLayer
 import os
 from qgis.utils import iface
-from PyQt5.QtWidgets import QMessageBox, QFileDialog
+from qgis.PyQt.QtWidgets import QMessageBox, QFileDialog
 SCRIPTS_PATH = os.path.dirname(os.path.abspath(__file__))
 
 def apply_qml_style_to_layer(layer, qml_file_path=None, show_messages=True):
@@ -115,7 +115,7 @@ if temp_layer:
     )
     
     # Sprawdź wynik zapisu
-    if result[0] == QgsVectorFileWriter.NoError:
+    if result[0] == QgsVectorFileWriter.WriterError.NoError:
         print(f"Warstwa została pomyślnie zapisana do: {output_path}")
         
         # Usuń starą warstwę tymczasową z projektu

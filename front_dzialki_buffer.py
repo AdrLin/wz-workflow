@@ -3,7 +3,7 @@ import processing
 from qgis.core import (
     QgsProject, QgsField, QgsVectorLayer
 )
-from PyQt5.QtWidgets import QMessageBox
+from qgis.PyQt.QtWidgets import QMessageBox
 from qgis.PyQt.QtCore import QVariant
 from qgis.utils import iface
 

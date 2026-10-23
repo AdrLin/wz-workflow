@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+# Ciezkie biblioteki — czytelny komunikat zamiast surowego bledu importu.
+try:
+    import pandas as pd
+    import numpy as np
+except ImportError as _exc:
+    raise ImportError(
+        "Ten krok wymaga bibliotek naukowych (numpy/pandas/scipy). "
+        "Zainstaluj je w srodowisku Pythona QGIS:  "
+        "python3 -m pip install numpy pandas scipy scikit-learn joblib\n"
+        f"Szczegoly: {_exc}"
+    ) from _exc
+
 """
 headless_classifier.py  —  WERSJA PRZENOŚNA (odbudowa architektury + wagi)
 =========================================================================
@@ -29,8 +42,6 @@ os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 os.environ.setdefault("MPLBACKEND", "Agg")
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
-import numpy as np
-import pandas as pd
 from pathlib import Path
 from PIL import Image
 

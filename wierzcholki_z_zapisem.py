@@ -20,11 +20,11 @@ def process_polygon_vertices(input_layer, qml_file_path=None):
     4. Zapisuje lub pozostawia w edycji w zależności od liczby wierzchołków
     """
     
-    if not input_layer or input_layer.type() != QgsMapLayer.VectorLayer:
+    if not input_layer or input_layer.type() != QgsMapLayer.LayerType.VectorLayer:
         print("Błąd: Wybierz prawidłową warstwę wektorową")
         return None
     
-    if input_layer.geometryType() != QgsWkbTypes.PolygonGeometry:
+    if input_layer.geometryType() != QgsWkbTypes.GeometryType.PolygonGeometry:
         print("Błąd: Warstwa musi zawierać poligony")
         return None
     
@@ -192,7 +192,7 @@ def process_polygon_vertices(input_layer, qml_file_path=None):
         save_options
     )
     
-    if error[0] != QgsVectorFileWriter.NoError:
+    if error[0] != QgsVectorFileWriter.WriterError.NoError:
         print(f"Błąd zapisu: {error}")
         return None
     

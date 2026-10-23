@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+# Ciezkie biblioteki — czytelny komunikat zamiast surowego bledu importu.
+try:
+    import pandas as pd
+    import numpy as np
+    from scipy.spatial import cKDTree
+except ImportError as _exc:
+    raise ImportError(
+        "Ten krok wymaga bibliotek naukowych (numpy/pandas/scipy). "
+        "Zainstaluj je w srodowisku Pythona QGIS:  "
+        "python3 -m pip install numpy pandas scipy scikit-learn joblib\n"
+        f"Szczegoly: {_exc}"
+    ) from _exc
+
 """
 przygotuj_dachy_do_klasyfikacji.py  —  WERSJA POD NOWY MODEL CNN
 ================================================================
@@ -19,14 +33,11 @@ import os
 import sys
 import json
 import threading
-import subprocess
+import subprocess  # nosec B404 - uruchamiamy WYLACZNIE wlasny skrypt wtyczki
 from pathlib import Path
 
-import numpy as np
-import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
-from scipy.spatial import cKDTree
 from PIL import Image
 from qgis.core import QgsProject
 
@@ -40,11 +51,44 @@ SCRIPTS_PATH = os.path.dirname(os.path.abspath(__file__))
 WARSTWA  = "Classification_6_with_IDs"     # warstwa punktowa z X, Y, Z, ID_BUDYNKU
 HEADLESS = "headless_classifier.py"        # predyktor uruchamiany w tle
 
-# Interpreter Pythona z TensorFlow do uruchomienia klasyfikatora.
-# Domyślnie ten sam, pod którym chodzi QGIS (sys.executable).
-# Jeśli TF jest w INNYM środowisku (np. ml-cnn), wpisz tu pełną ścieżkę do jego pythona, np.:
-#   PYTHON_EXE = "/home/adrian/miniconda3/envs/ml-cnn/bin/python"
-PYTHON_EXE = sys.executable
+# Interpreter Pythona do uruchomienia klasyfikatora w tle.
+#
+# ⚠️ UWAGA WINDOWS: w QGIS na Windows sys.executable wskazuje qgis-bin.exe,
+# a NIE python.exe! Uruchomienie skryptu takim "interpreterem" odpala kolejna
+# kopie QGIS zamiast Pythona (stad m.in. otwieranie projektu w nowym oknie
+# i zawieszenie na oczekiwaniu na plik CSV, ktory nigdy nie powstaje).
+# Funkcja ponizej znajduje PRAWDZIWY interpreter Pythona QGIS na kazdej platformie.
+def _find_qgis_python():
+    """Zwraca sciezke do interpretera python(.exe), nie do qgis-bin.exe."""
+    exe = sys.executable or ""
+    base = os.path.basename(exe).lower()
+
+    # Na Linux/macOS sys.executable zwykle JEST pythonem
+    if 'python' in base:
+        return exe
+
+    # Windows / inne: sys.executable to qgis-bin.exe — szukamy pythona obok
+    candidates = []
+    exe_dir = os.path.dirname(exe)                       # ...\QGIS\bin
+    prefix = sys.prefix                                   # katalog srodowiska Pythona
+    for d in (exe_dir, prefix, os.path.join(prefix, 'bin')):
+        for name in ('python3.exe', 'python.exe', 'python3', 'python'):
+            candidates.append(os.path.join(d, name))
+    # dodatkowo: typowy uklad OSGeo4W (apps\Python3xx\python.exe)
+    root = os.path.dirname(exe_dir)                        # ...\QGIS
+    import glob as _glob
+    candidates += _glob.glob(os.path.join(root, 'apps', 'Python*', 'python.exe'))
+
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+
+    # Ostatnia deska ratunku — zwroc sys.executable (moze zadziala na Linux)
+    return exe
+
+# Jesli TensorFlow jest w INNYM srodowisku (np. ml-cnn), wpisz tu pelna sciezke
+# do jego pythona, np.:  PYTHON_EXE = "/home/adrian/miniconda3/envs/ml-cnn/bin/python"
+PYTHON_EXE = _find_qgis_python()
 
 # Parametry rasteryzacji — MUSZĄ być identyczne jak przy budowie datasetu treningowego!
 GRID, PAD = 96, 4
@@ -109,8 +153,13 @@ def run_script_bg(script_path, args=None, python_exe=None):
             command = [python_exe or sys.executable, script_path]
             if args:
                 command.extend(args)
-            result = subprocess.run(command, capture_output=True, text=True,
-                                    cwd=os.path.dirname(script_path))
+            # Komenda budowana WYLACZNIE z interpretera Pythona (sys.executable)
+            # oraz sciezki do skryptu nalezacego do wtyczki. Brak shell=True,
+            # brak danych od uzytkownika w komendzie.
+            result = subprocess.run(  # nosec B603
+                command, capture_output=True, text=True,
+                cwd=os.path.dirname(script_path), check=False
+            )
             print(f"Klasyfikator zakończony, rc={result.returncode}")
             if result.stdout:
                 print("STDOUT:", result.stdout)

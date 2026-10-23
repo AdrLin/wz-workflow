@@ -10,14 +10,14 @@ from qgis.core import (QgsPointXY,
     QgsFields,QgsFeature,QgsWkbTypes,QgsGeometry,
     QgsFeatureRequest)
 from qgis import processing
-from PyQt5.QtWidgets import QProgressDialog, QApplication
-from PyQt5.QtCore import QVariant
+from qgis.PyQt.QtWidgets import QProgressDialog, QApplication
+from qgis.PyQt.QtCore import QVariant
 from qgis.utils import iface
 from pathlib import Path
 import os
-from PyQt5.QtWidgets import ( QMessageBox, QFileDialog)
+from qgis.PyQt.QtWidgets import ( QMessageBox, QFileDialog)
 import time
-from PyQt5.QtCore import Qt
+from qgis.PyQt.QtCore import Qt
 import math
 # Zmniejsz użycie pamięci cache
 from qgis.core import QgsSettings
@@ -162,7 +162,7 @@ def analiza_pbc_per_dzialka(dzialki_layer_name, nazwa_maski=None):
         "Anuluj", 0, n_dzialek, iface.mainWindow()
     )
     progress.setWindowTitle("Analiza PBC")
-    progress.setWindowModality(Qt.WindowModal)
+    progress.setWindowModality(Qt.WindowModality.WindowModal)
     progress.setValue(0)
 
     # === 5. Pętla po działkach ===
@@ -521,7 +521,7 @@ def oblicz_wskazniki_dzialek(dzialki_layer_name, new_layer_name):
             if geom_b and geom_b.intersects(geom_d):
                 czesc_wspolna = geom_b.intersection(geom_d)
                 if czesc_wspolna and czesc_wspolna.area() / geom_b.area() >= PROG_PROCENT:
-                    if QgsWkbTypes.geometryType(czesc_wspolna.wkbType()) == QgsWkbTypes.PolygonGeometry and czesc_wspolna.area() > 0:
+                    if QgsWkbTypes.geometryType(czesc_wspolna.wkbType()) == QgsWkbTypes.GeometryType.PolygonGeometry and czesc_wspolna.area() > 0:
                         pow = czesc_wspolna.area()
                         suma_pow_zabud += pow
                         liczba_kond = budynek["KONDYGNACJE_NADZIEMNE"] or 1
@@ -677,6 +677,11 @@ try:
     # obliczanie wskaznikow
     oblicz_wskazniki_dzialek(dzialki_layer_name="granica_terenu", 
                              new_layer_name="granica_terenu_wskazniki")
+    # nadawanie odmiennej stylizacji
+    style_name = "WSKAZNIKI_teren_inwestycji.qml"
+    pply_qml_style_to_layer(layer = "granica_terenu_wskazniki", 
+                             qml_file_path=os.path.join(SCRIPTS_PATH, style_name), 
+                             show_messages=True)
 except:
     print("Brak wskaźników dla działki przedmiotowej")
 

@@ -1,8 +1,20 @@
 # -*- coding: utf-8 -*-
 
-from qgis.PyQt.QtWidgets import QAction
+# --- Zgodnosc Qt5 (QGIS 3) / Qt6 (QGIS 4) ---
+# Musi byc PRZED reszta importow: przywraca QVariant.Int, QVariant.String itd.,
+# ktore w Qt6 zostaly usuniete. Patrz qt_compat.py.
+from .qt_compat import patch_qvariant
+patch_qvariant()
+
+# QAction: w Qt5 mieszka w QtWidgets, w Qt6 przeniesiono go do QtGui.
+try:
+    from qgis.PyQt.QtGui import QAction        # Qt6 / QGIS 4
+except ImportError:
+    from qgis.PyQt.QtWidgets import QAction    # Qt5 / QGIS 3
+
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtCore import QCoreApplication
+from qgis.core import Qgis
 import os
 from .model_downloader import ModelDownloader
 
@@ -85,7 +97,7 @@ class WZWorkflowPlugin:
                 self.iface.messageBar().pushMessage(
                     "Info", 
                     "WZ Workflow jest już otwarty", 
-                    level=0,
+                    level=Qgis.MessageLevel.Info,
                     duration=2
                 )
                 return
@@ -101,7 +113,7 @@ class WZWorkflowPlugin:
                     self.iface.messageBar().pushMessage(
                         "Błąd", 
                         "Nie udało się pobrać modeli ML. Wtyczka może nie działać poprawnie.", 
-                        level=2,
+                        level=Qgis.MessageLevel.Critical,
                         duration=5
                     )
                     # Można dodać return żeby nie kontynuować, lub pozwolić kontynuować
@@ -112,8 +124,10 @@ class WZWorkflowPlugin:
                 from .improved_wz_workflow import create_wz_workflow_dock
                 print("WZ Workflow: Moduł zaimportowany pomyślnie")
             except ImportError as ie:
-                print(f"BŁĄD importu: {ie}")
-                self.show_import_error()
+                import traceback
+                details = traceback.format_exc()
+                print(f"BŁĄD importu: {ie}\n{details}")
+                self.show_import_error(str(ie), details)
                 return
             
             # Utwórz dock widget
@@ -124,7 +138,7 @@ class WZWorkflowPlugin:
                 self.iface.messageBar().pushMessage(
                     "Sukces", 
                     "WZ Workflow został uruchomiony pomyślnie!", 
-                    level=3,  # Success
+                    level=Qgis.MessageLevel.Success,  # Success
                     duration=3
                 )
                 
@@ -142,32 +156,38 @@ class WZWorkflowPlugin:
             self.iface.messageBar().pushMessage(
                 "Błąd", 
                 f"Wystąpił błąd: {str(e)}", 
-                level=2,  # Critical
+                level=Qgis.MessageLevel.Critical,  # Critical
                 duration=5
             )
     
-    def show_import_error(self):
+    def show_import_error(self, error=None, details=None):
         """Pokaż błąd importu"""
         from qgis.PyQt.QtWidgets import QMessageBox
         
         msg = QMessageBox()
-        msg.setIcon(QMessageBox.Warning)
+        msg.setIcon(QMessageBox.Icon.Warning)
         msg.setWindowTitle("WZ Workflow - Błąd importu")
         msg.setText("Nie można zaimportować głównego modułu!")
-        msg.setInformativeText(
-            "Sprawdź czy wszystkie pliki wtyczki są prawidłowo zainstalowane:\n"
-            "- improved_wz_workflow.py\n"
-            "- wz_workflow_plugin.py\n"
-            "- __init__.py\n"
-            "- metadata.txt"
+
+        info = ""
+        if error:
+            info += f"Błąd:\n{error}\n\n"
+        info += (
+            "Najczęstsza przyczyna to brakująca biblioteka Pythona.\n"
+            "Wtyczka wymaga m.in.: pandas, scipy, scikit-learn, joblib.\n\n"
+            "Zainstaluj brakującą bibliotekę w środowisku Pythona QGIS, np.:\n"
+            "    python3 -m pip install pandas"
         )
-        msg.setStandardButtons(QMessageBox.Ok)
-        msg.exec_()
+        msg.setInformativeText(info)
+        if details:
+            msg.setDetailedText(details)
+        msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg.exec()
         
         self.iface.messageBar().pushMessage(
             "Błąd", 
             "Błąd importu modułu WZ Workflow", 
-            level=2,
+            level=Qgis.MessageLevel.Critical,
             duration=5
         )
     
@@ -176,9 +196,9 @@ class WZWorkflowPlugin:
         from qgis.PyQt.QtWidgets import QMessageBox
         
         msg = QMessageBox()
-        msg.setIcon(QMessageBox.Critical)
+        msg.setIcon(QMessageBox.Icon.Critical)
         msg.setWindowTitle("WZ Workflow - Błąd uruchamiania")
         msg.setText("Nie można utworzyć interfejsu WZ Workflow!")
         msg.setInformativeText(f"Szczegóły błędu:\n{error_msg}")
-        msg.setStandardButtons(QMessageBox.Ok)
-        msg.exec_()
+        msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg.exec()

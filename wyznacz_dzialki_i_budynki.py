@@ -18,9 +18,9 @@ from pathlib import Path
 from qgis.PyQt.QtWidgets import (QDialog, QVBoxLayout,
             QListWidget, QPushButton, QListWidgetItem)
 
-from PyQt5.QtCore import QVariant
+from qgis.PyQt.QtCore import QVariant
 import os
-from PyQt5.QtWidgets import QMessageBox, QFileDialog
+from qgis.PyQt.QtWidgets import QMessageBox, QFileDialog
 from qgis.PyQt.QtCore import Qt
 
 MINIMALNA_POWIERZCHNIA = 2.0  # m²
@@ -87,7 +87,7 @@ def utworz_bufor_200m():
         QgsMessageLog.logMessage(
             f"Nie znaleziono warstwy: {nazwa_warstwy}",
             "Buffer Script", 
-            Qgis.Critical
+            Qgis.MessageLevel.Critical
         )
         print(f"BŁĄD: Nie znaleziono warstwy '{nazwa_warstwy}'")
         return None
@@ -100,7 +100,7 @@ def utworz_bufor_200m():
         QgsMessageLog.logMessage(
             f"Warstwa {nazwa_warstwy} nie jest warstwą wektorową",
             "Buffer Script", 
-            Qgis.Critical
+            Qgis.MessageLevel.Critical
         )
         print(f"BŁĄD: Warstwa '{nazwa_warstwy}' nie jest warstwą wektorową")
         return None
@@ -145,7 +145,7 @@ def utworz_bufor_200m():
             QgsMessageLog.logMessage(
                 f"Utworzono bufor 200m dla warstwy {nazwa_warstwy}",
                 "Buffer Script", 
-                Qgis.Success
+                Qgis.MessageLevel.Success
             )
             
             return warstwa_bufor
@@ -157,7 +157,7 @@ def utworz_bufor_200m():
     except Exception as e:
         error_msg = f"Błąd podczas tworzenia bufora: {str(e)}"
         print(error_msg)
-        QgsMessageLog.logMessage(error_msg, "Buffer Script", Qgis.Critical)
+        QgsMessageLog.logMessage(error_msg, "Buffer Script", Qgis.MessageLevel.Critical)
         return None
     
     
@@ -258,7 +258,7 @@ def zapisz_warstwe_do_gpkg(layer, output_directory, layer_name=None):
     options.driverName = 'GPKG'
     options.fileEncoding = 'UTF-8'
     options.layerName = layer_name
-    options.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteFile  # Nadpisuj jeśli istnieje
+    options.actionOnExistingFile = QgsVectorFileWriter.ActionOnExistingFile.CreateOrOverwriteFile  # Nadpisuj jeśli istnieje
     
     result = QgsVectorFileWriter.writeAsVectorFormatV3(
         layer, 
@@ -267,7 +267,7 @@ def zapisz_warstwe_do_gpkg(layer, output_directory, layer_name=None):
         options
     )
     
-    if result[0] == QgsVectorFileWriter.NoError:
+    if result[0] == QgsVectorFileWriter.WriterError.NoError:
         print(f"✅ Warstwa '{layer_name}' zapisana do: {output_path}")
         
         # Usuń starą warstwę z projektu
@@ -692,12 +692,12 @@ class ZabudowaDialog(QDialog):
         self.resize(300, 400)
         layout = QVBoxLayout()
         self.listWidget = QListWidget()
-        self.listWidget.setSelectionMode(QListWidget.MultiSelection)
+        self.listWidget.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
 
         for opcja in sorted(opcje):
             item = QListWidgetItem(opcja)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Unchecked)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
             self.listWidget.addItem(item)
 
         self.ok_button = QPushButton("Filtruj działki")
@@ -711,11 +711,11 @@ class ZabudowaDialog(QDialog):
         return [
             self.listWidget.item(i).text()
             for i in range(self.listWidget.count())
-            if self.listWidget.item(i).checkState() == Qt.Checked
+            if self.listWidget.item(i).checkState() == Qt.CheckState.Checked
         ]
 
 dialog = ZabudowaDialog(rodzaje_zabud)
-if not dialog.exec_():
+if not dialog.exec():
     raise Exception("Anulowano wybór")
 
 wybrane_funkcje = dialog.get_selected_options()
@@ -951,7 +951,7 @@ def analiza_przestrzenna():
         
         if (
             not new_geom.isEmpty()
-            and new_geom.type() == QgsWkbTypes.PolygonGeometry
+            and new_geom.type() == QgsWkbTypes.GeometryType.PolygonGeometry
             and new_area >= MINIMALNA_POWIERZCHNIA
         ):
             # Zaktualizuj geometrię działki

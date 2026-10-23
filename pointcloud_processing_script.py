@@ -22,7 +22,7 @@ from qgis.core import (
     QgsProcessingFeedback, QgsProject,
     QgsVectorLayer, QgsProcessingContext,
     QgsField, QgsRasterLayer, QgsPointCloudLayer,
-    QgsCoordinateTransform, QgsRaster
+    QgsCoordinateTransform, QgsRaster, QgsApplication
 )
 from qgis import processing
 from qgis.PyQt.QtCore import QVariant, Qt
@@ -378,7 +378,7 @@ def add_rgb_from_orthophoto(vector_layer, orthophoto_layer_name):
             point = transform.transform(point)
         
         try:
-            ident = raster_provider.identify(point, QgsRaster.IdentifyFormatValue)
+            ident = raster_provider.identify(point, QgsRaster.IdentifyFormat.IdentifyFormatValue)
             
             if ident.isValid():
                 results = ident.results()
@@ -405,7 +405,8 @@ def add_rgb_from_orthophoto(vector_layer, orthophoto_layer_name):
                         success_count += 1
                     
         except Exception as e:
-            pass
+            # celowo ignorowane: operacja best-effort (np. odlaczenie sygnalu, ktory moze nie byc podlaczony)
+            pass  # nosec B110
         
         processed += 1
         
@@ -431,6 +432,46 @@ def add_rgb_from_orthophoto(vector_layer, orthophoto_layer_name):
 
 # ==================== KROKI PIPELINE ====================
 
+# Preferowany format posredni, gdy formatu wejscia NIE da sie rozpoznac.
+# 'LAS' — nieskompresowany, najszerzej czytany (wygodny do podgladu).
+# 'LAZ' — skompresowany, oszczedza miejsce przy duzych chmurach.
+DEFAULT_INTERMEDIATE_FORMAT = 'LAS'
+
+# Mapowanie nazwa formatu → indeks enuma VPC_OUTPUT_FORMAT w pdal:filter.
+# Kolejnosc opcji w QGIS 4: ['COPC', 'LAZ', 'LAS'].
+_VPC_FORMAT_INDEX = {'COPC': 0, 'LAZ': 1, 'LAS': 2}
+
+
+def detect_pointcloud_format(layer):
+    """
+    Rozpoznaje format wejsciowej chmury na podstawie zrodla warstwy i zwraca
+    NAZWE formatu posredniego, ktorego uzyjemy przy zapisie przez pdal:filter.
+
+    Zasada:
+      • wejscie COPC (*.copc.laz)  → zapis LAZ (COPC to i tak skompresowany LAZ)
+      • wejscie LAZ (*.laz)        → zapis LAZ
+      • wejscie LAS (*.las)        → zapis LAS
+      • cokolwiek innego / brak    → DEFAULT_INTERMEDIATE_FORMAT
+
+    Dziala niezaleznie od preferencji uzytkownika i zrodla danych.
+    """
+    try:
+        source = layer.source() if layer is not None else ''
+    except Exception:
+        source = ''
+    src = str(source).lower()
+    # odetnij ewentualne parametry po '|' (QGIS czasem docina je do zrodla)
+    src = src.split('|', 1)[0].strip()
+
+    if src.endswith('.copc.laz'):
+        return 'LAZ'          # COPC rozpakowujemy do zwyklego LAZ
+    if src.endswith('.laz'):
+        return 'LAZ'
+    if src.endswith('.las'):
+        return 'LAS'
+    return DEFAULT_INTERMEDIATE_FORMAT
+
+
 def step1_filter_points(input_layer, context, feedback):
     """
     Krok 1: Filtrowanie punktów z Classification != 0
@@ -443,7 +484,18 @@ def step1_filter_points(input_layer, context, feedback):
         'FILTER_EXTENT': None,
         'OUTPUT': 'TEMPORARY_OUTPUT'
     }
-    
+
+    # QGIS 4 dodal do pdal:filter obowiazkowy parametr VPC_OUTPUT_FORMAT
+    # (enum: 0=COPC, 1=LAZ, 2=LAS). W QGIS 3 tego parametru NIE MA, wiec
+    # ustawiamy go tylko jesli algorytm faktycznie go definiuje — dzieki
+    # temu ten sam kod dziala w obu wersjach.
+    _alg = QgsApplication.processingRegistry().algorithmById("pdal:filter")
+    if _alg and any(p.name() == 'VPC_OUTPUT_FORMAT' for p in _alg.parameterDefinitions()):
+        fmt_name = detect_pointcloud_format(input_layer)
+        filter_params['VPC_OUTPUT_FORMAT'] = _VPC_FORMAT_INDEX[fmt_name]
+        logger.log(f"   Wykryty format wyjsciowy: {fmt_name} "
+                   f"(indeks {_VPC_FORMAT_INDEX[fmt_name]})")
+
     logger.log("   Parametry filtrowania:")
     for key, value in filter_params.items():
         logger.log(f"      {key}: {value}")
@@ -847,7 +899,7 @@ class PointCloudProcessingDialog(QDialog):
         header_font.setPointSize(14)
         header_font.setBold(True)
         header.setFont(header_font)
-        header.setAlignment(Qt.AlignCenter)
+        header.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(header)
         
         layout.addSpacing(20)
@@ -1062,9 +1114,9 @@ def show_processing_dialog():
         # Pokaż dialog
         logger.log("\n📋 Pokazuję dialog konfiguracji...")
         dialog = PointCloudProcessingDialog(has_rgb, orthophotos)
-        result = dialog.exec_()
+        result = dialog.exec()
         
-        if result == QDialog.Accepted:
+        if result == QDialog.DialogCode.Accepted:
             logger.log("\n✅ Użytkownik zatwierdził - rozpoczynam przetwarzanie!")
             logger.log("="*80)
             

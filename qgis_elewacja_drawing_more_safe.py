@@ -14,7 +14,7 @@ from qgis.core import (
     QgsProject, QgsField, QgsVectorLayer, QgsFeature, QgsFields,
     QgsVectorFileWriter, QgsCoordinateTransformContext
 )
-from PyQt5.QtWidgets import ( QMessageBox
+from qgis.PyQt.QtWidgets import ( QMessageBox
 )
 from qgis.PyQt.QtCore import QVariant
 from qgis.utils import iface
@@ -85,8 +85,8 @@ class DrawingController:
             try:
                 self.drawing_layer.featureAdded.disconnect()
                 self.drawing_layer.geometryChanged.disconnect()
-            except:
-                pass  # Ignoruj jeśli nie były podłączone
+            except Exception:
+                pass  # nosec B110 - celowe: sygnal moze nie byc podlaczony
             
             # Podłącz sygnały z zabezpieczeniami
             self.drawing_layer.featureAdded.connect(self.safe_on_feature_added)
@@ -315,7 +315,7 @@ class DrawingController:
         try:
             from qgis.gui import QgsRubberBand
             from qgis.core import QgsWkbTypes
-            from PyQt5.QtGui import QColor
+            from qgis.PyQt.QtGui import QColor
             
             if not self.buildings_layer or not self.buildings_layer.isValid():
                 return
@@ -327,7 +327,7 @@ class DrawingController:
                 self.rubber_band.reset()
             
             # Stwórz nowy rubber band (żółta obwódka)
-            self.rubber_band = QgsRubberBand(iface.mapCanvas(), QgsWkbTypes.PolygonGeometry)
+            self.rubber_band = QgsRubberBand(iface.mapCanvas(), QgsWkbTypes.GeometryType.PolygonGeometry)
             self.rubber_band.setColor(QColor(255, 255, 0, 100))  # Żółty z przezroczystością
             self.rubber_band.setWidth(5)
             self.rubber_band.setToGeometry(feature.geometry(), self.buildings_layer)
@@ -437,7 +437,7 @@ class DrawingController:
             from qgis.PyQt.QtCore import QTimer, QEventLoop
             loop = QEventLoop()
             QTimer.singleShot(300, loop.quit)
-            loop.exec_()
+            loop.exec()
             
             # Połącz dane
             print("🔄 Łączenie danych...")
@@ -449,7 +449,7 @@ class DrawingController:
             # Małe opóźnienie
             loop = QEventLoop()
             QTimer.singleShot(300, loop.quit)
-            loop.exec_()
+            loop.exec()
             
             # Zapisz i stylizuj
             print("🔄 Zapisywanie i stylizacja...")
@@ -513,13 +513,24 @@ class DrawingController:
                 memory_layer.dataProvider().addAttributes(fields)
                 memory_layer.updateFields()
                 
-                # Deduplikacja: dla każdego ID_BUDYNKU zostaw OSTATNI (najnowszy) wpis
-                # Append mode w CSV powoduje, że poprawny pomiar jest na końcu, zły na początku
+                                # Pomiar ponizej progu (0 po "pomin", pusty) = BRAK pomiaru:
+                # trafia do warstwy jako NULL, nie jako 0, i nie nadpisuje
+                # wczesniejszego poprawnego pomiaru tego samego budynku.
+                MIN_SZEROKOSC = 2.0  # [m] — spójne z progiem w wczytaj_csv
                 rows_by_id = {}
                 for row in reader:
                     building_id = row.get('ID_BUDYNKU', '').strip()
-                    if building_id:
-                        rows_by_id[building_id] = row  # nadpisuje poprzedni — ostatni wygrywa
+                    if not building_id:
+                        continue
+                    try:
+                        szer = float(row.get('szer_elew_front', '').strip())
+                    except (ValueError, TypeError, AttributeError):
+                        szer = None
+                    if szer is None or szer < MIN_SZEROKOSC:
+                        row['szer_elew_front'] = ''
+                        rows_by_id.setdefault(building_id, row)
+                    else:
+                        rows_by_id[building_id] = row  # ostatni poprawny wygrywa
 
                 features = []
                 for row in rows_by_id.values():
@@ -581,7 +592,7 @@ class DrawingController:
                 layer, output_path, QgsCoordinateTransformContext(), options
             )
             
-            if error[0] != QgsVectorFileWriter.NoError:
+            if error[0] != QgsVectorFileWriter.WriterError.NoError:
                 print(f"❌ Błąd zapisu: {error[1]}")
                 return
             
@@ -711,8 +722,9 @@ def zakoncz_pomiary_bezpiecznie():
                 drawing_controller.drawing_layer.featureAdded.disconnect()
                 drawing_controller.drawing_layer.geometryChanged.disconnect()
                 print("✅ Sygnały odłączone")
-            except:
-                pass
+            except Exception:
+                # celowo ignorowane: operacja best-effort (np. odlaczenie sygnalu, ktory moze nie byc podlaczony)
+                pass  # nosec B110
                 
             if drawing_controller.drawing_layer.isEditable():
                 drawing_controller.drawing_layer.commitChanges()

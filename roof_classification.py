@@ -13,13 +13,13 @@ from qgis.core import (QgsProject, QgsVectorLayer, QgsFeature,
                        Qgis,QgsMessageLog,
     QgsFields, QgsField, QgsVectorFileWriter, 
     QgsCoordinateTransformContext)
-from PyQt5.QtWidgets import QDialog, QVBoxLayout, QComboBox, QPushButton, QLabel, QHBoxLayout, QLineEdit
+from qgis.PyQt.QtWidgets import QDialog, QVBoxLayout, QComboBox, QPushButton, QLabel, QHBoxLayout, QLineEdit
 import processing
 from pathlib import Path
-from PyQt5.QtCore import QVariant
+from qgis.PyQt.QtCore import QVariant
 import time
 from qgis.utils import iface
-from PyQt5.QtWidgets import QMessageBox, QFileDialog
+from qgis.PyQt.QtWidgets import QMessageBox, QFileDialog
 
 # Ścieżka do pliku CSV
 project_path = QgsProject.instance().fileName()
@@ -140,7 +140,7 @@ def zapis_do_gpkg(temp_layer):
             options
         )
         
-        if result[0] == QgsVectorFileWriter.NoError:
+        if result[0] == QgsVectorFileWriter.WriterError.NoError:
             print(f"Warstwa została pomyślnie zapisana do: {output_path}")
             QgsProject.instance().removeMapLayer(temp_layer)
             
@@ -164,27 +164,30 @@ if not os.path.exists(csv_file):
 
         
 def popraw_nachylenie_dla_plaskich(warstwa):
-    idx_kat = warstwa.fields().indexFromName("Kategoria")
-    idx_nach = warstwa.fields().indexFromName("nachylenie")
-    licznik = 0
-
-    if idx_kat == -1 or idx_nach == -1:
+    nazwy = ("Kategoria", "nachylenie", "nachylenie_od", "nachylenie_do", "nachylenie_przedzial")
+    idx = {n: warstwa.fields().indexFromName(n) for n in nazwy}
+    if idx["Kategoria"] == -1 or idx["nachylenie"] == -1:
         print("❌ Nie znaleziono wymaganych pól w warstwie.")
         return
+    ma_przedzialy = all(idx[n] != -1 for n in ("nachylenie_od", "nachylenie_do", "nachylenie_przedzial"))
 
+    licznik = 0
     warstwa.startEditing()
     for f in warstwa.getFeatures():
-        if f["Kategoria"] == "płaski":
-            try:
-                nach = float(f["nachylenie"])
-                if nach > 5:
-                    f[idx_nach] = 5
-                    warstwa.updateFeature(f)
-                    licznik += 1
-            except Exception as e:
-                print(f"⚠️ Błąd przy analizie feature ID {f.id()}: {e}")
+        if f["Kategoria"] != "płaski":
+            continue
+        try:
+            if float(f["nachylenie"] or 0) > 5:
+                warstwa.changeAttributeValue(f.id(), idx["nachylenie"], 5)
+            if ma_przedzialy and float(f["nachylenie_do"] or 0) > 5:
+                warstwa.changeAttributeValue(f.id(), idx["nachylenie_od"], 0)
+                warstwa.changeAttributeValue(f.id(), idx["nachylenie_do"], 5)
+                warstwa.changeAttributeValue(f.id(), idx["nachylenie_przedzial"], "0-5")
+                licznik += 1
+        except (TypeError, ValueError) as e:
+            print(f"⚠️ Błąd przy analizie feature ID {f.id()}: {e}")
     warstwa.commitChanges()
-    print(f"🔧 Zmieniono nachylenie dla {licznik} dachów płaskich > 5°")
+    print(f"🔧 Poprawiono nachylenie dla {licznik} dachów płaskich > 5°")
 
 
 
@@ -373,8 +376,9 @@ def wczytaj_csv_do_qgis(sciezka_csv, nazwa_kolumny_x=None, nazwa_kolumny_y=None,
                         if i >= 3:
                             break
                         print(f"  {i+1}: {repr(line.strip())}")
-            except:
-                pass
+            except Exception:
+                # celowo ignorowane: operacja best-effort (np. odlaczenie sygnalu, ktory moze nie byc podlaczony)
+                pass  # nosec B110
             return None
     
     QgsProject.instance().addMapLayer(warstwa)
@@ -389,28 +393,49 @@ def wczytaj_csv_do_qgis(sciezka_csv, nazwa_kolumny_x=None, nazwa_kolumny_y=None,
     QgsMessageLog.logMessage(
         f"Wczytano warstwę CSV: {nazwa_warstwy} ({warstwa.featureCount()} obiektów)",
         "CSV Loader", 
-        Qgis.Info
+        Qgis.MessageLevel.Info
     )
     
     return warstwa
 
-def wait_for_file():
+def wait_for_file(timeout_s=600):
     """
-    Czeka na pojawienie się pliku building_predictions.csv w katalogu PREDICTION_DIR
-    """
-    prediction_dir = PREDICTION_DIR
+    Czeka na pojawienie sie pliku building_predictions.csv w katalogu PREDICTION_DIR.
 
+    WAZNE: nie blokujemy glownego watku GUI. Zwykla petla z time.sleep()
+    zamraza cala aplikacje QGIS ("brak odpowiedzi"), bo interfejs nie moze
+    przetwarzac zdarzen. Dlatego w kazdej iteracji oddajemy sterowanie do
+    petli zdarzen Qt (processEvents), dzieki czemu okno pozostaje responsywne,
+    a uzytkownik widzi postep.
+    """
+    from qgis.PyQt.QtWidgets import QApplication
+
+    prediction_dir = PREDICTION_DIR
     file_path = Path(prediction_dir) / "building_predictions.csv"
-    
+
     print(f"Oczekiwanie na plik: {file_path}")
-    
-    while True:
+
+    waited = 0
+    poll = 0.5  # sekundy — czestsze sprawdzanie, ale bez blokady GUI
+    while waited < timeout_s:
         if file_path.exists() and file_path.is_file():
             print(f"Plik znaleziony: {file_path}")
             return str(file_path)
-        else:
-            print("Plik nie istnieje. Sprawdzam ponownie za 5 sekund...")
-            time.sleep(5)
+
+        # oddaj sterowanie GUI, zeby QGIS nie pokazywal "brak odpowiedzi"
+        QApplication.processEvents()
+        time.sleep(poll)
+        waited += poll
+
+        # co ~5 s wypisz komunikat, zeby nie zasypywac konsoli
+        if int(waited) % 5 == 0 and abs(waited - int(waited)) < poll:
+            print(f"   ...czekam na klasyfikator ({int(waited)}s / limit {timeout_s}s)")
+
+    # przekroczono limit czasu — klasyfikator prawdopodobnie sie nie uruchomil
+    print(f"❌ Przekroczono limit {timeout_s}s oczekiwania na {file_path.name}.")
+    print("   Sprawdz, czy klasyfikator dachow uruchomil sie poprawnie "
+          "(interpreter Pythona, TensorFlow, model CNN).")
+    return None
             
 def apply_qml_style_to_layer(layer, qml_file_path=None, show_messages=True):
     """
@@ -601,7 +626,16 @@ PREDICTION_DIR = get_prediction_data_dir()
     
 # Czekaj na plik
 file_path = wait_for_file()
-    
+
+if file_path is None:
+    # klasyfikator nie zdazyl / nie uruchomil sie — nie brniemy dalej
+    print("❌ Nie doczekano sie wynikow klasyfikacji dachow. Krok przerwany.")
+    raise RuntimeError(
+        "Klasyfikacja dachow nie utworzyla pliku building_predictions.csv "
+        "w wyznaczonym czasie. Sprawdz logi klasyfikatora (interpreter Pythona, "
+        "TensorFlow, sciezka modelu CNN)."
+    )
+
 # TUTAJ ROZPOCZYNA SIĘ WŁAŚCIWY KOD PROGRAMU
 print("=" * 50)
 print("PLIK ZNALEZIONY! Wykonywanie dalszego kodu...")
@@ -750,11 +784,11 @@ else:
                                  nachylenie, kategorie, iface.mainWindow())
         
         dialog.show()
-        result = dialog.exec_()
+        result = dialog.exec()
         
-        if result == QDialog.Accepted:
+        if result == QDialog.DialogCode.Accepted:
             kategoria = dialog.get_selected_category()
-        elif result == QDialog.Rejected:
+        elif result == QDialog.DialogCode.Rejected:
             print("🛑 Przerwano wybór kategorii!")
             break
             

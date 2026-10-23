@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+# Ciezkie biblioteki — czytelny komunikat zamiast surowego bledu importu.
+try:
+    import pandas as pd
+except ImportError as _exc:
+    raise ImportError(
+        "Ten krok wymaga bibliotek naukowych (numpy/pandas/scipy). "
+        "Zainstaluj je w srodowisku Pythona QGIS:  "
+        "python3 -m pip install numpy pandas scipy scikit-learn joblib\n"
+        f"Szczegoly: {_exc}"
+    ) from _exc
+
 """
 output_and_results_unified.py
 
@@ -18,15 +30,14 @@ Struktura pliku wynikowego (analiza_wz_kompletna.xlsx):
 """
 
 import os
-import pandas as pd
 from pathlib import Path
 
-from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QGroupBox, 
+from qgis.PyQt.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QGroupBox, 
                             QLabel, QPushButton, QListWidget, QListWidgetItem,
                             QTreeWidget, QTreeWidgetItem, QMessageBox, 
                             QDialogButtonBox)
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QColor, QBrush
+from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtGui import QColor, QBrush
 
 
 # === ODMIANA RODZAJÓW ZABUDOWY (narzędnik żeński - "zabudową ...") ===
@@ -46,10 +57,13 @@ RODZAJ_ZABUDOWY_ODMIANA = {
 
 try:
     import openpyxl
-except ImportError:
-    print("⚠️ Instaluję openpyxl...")
-    os.system("pip install openpyxl")
-    import openpyxl
+except ImportError as exc:
+    # NIE instalujemy pakietow automatycznie przez powloke (os.system).
+    raise ImportError(
+        "Brak biblioteki 'openpyxl', wymaganej do zapisu arkuszy XLSX.\n"
+        "Zainstaluj ja w srodowisku Pythona QGIS, np.:\n"
+        "    python3 -m pip install openpyxl"
+    ) from exc
 
 from qgis.core import QgsProject
 
@@ -138,11 +152,11 @@ class FunctionMappingDialog(QDialog):
         left_group = QGroupBox("📋 Funkcje budynków w obszarze")
         left_layout = QVBoxLayout()
         self.functions_list = QListWidget()
-        self.functions_list.setSelectionMode(QListWidget.ExtendedSelection)
+        self.functions_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         
         for func_name, count in sorted(self.available_functions.items(), key=lambda x: x[1], reverse=True):
             item = QListWidgetItem(f"{func_name} ({count} bud.)")
-            item.setData(Qt.UserRole, func_name)
+            item.setData(Qt.ItemDataRole.UserRole, func_name)
             self.functions_list.addItem(item)
         
         left_layout.addWidget(self.functions_list)
@@ -169,7 +183,7 @@ class FunctionMappingDialog(QDialog):
         
         for planned in self.planned_buildings:
             item = QTreeWidgetItem([f"[{planned['suffix'].upper()}] {planned['funkcja']}", str(planned['liczba'])])
-            item.setData(0, Qt.UserRole, planned['suffix'])
+            item.setData(0, Qt.ItemDataRole.UserRole, planned['suffix'])
             item.setBackground(0, QBrush(QColor("#e8f5e9")))
             self.buildings_tree.addTopLevelItem(item)
             item.setExpanded(True)
@@ -191,7 +205,7 @@ class FunctionMappingDialog(QDialog):
         layout.addLayout(quick_layout)
         
         # Przyciski
-        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         button_box.accepted.connect(self.validate_and_accept)
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
@@ -209,13 +223,11 @@ class FunctionMappingDialog(QDialog):
         else:
             building_item = current
         
-        suffix = building_item.data(0, Qt.UserRole)
+        suffix = building_item.data(0, Qt.ItemDataRole.UserRole)
         
         for item in selected:
-            func_name = item.data(Qt.UserRole)
-            for s in self.mapping:
-                if func_name in self.mapping[s]:
-                    self.mapping[s].remove(func_name)
+            func_name = item.data(Qt.ItemDataRole.UserRole)
+            # Ta sama funkcja może być przypisana do kilku budynków planowanych
             if func_name not in self.mapping[suffix]:
                 self.mapping[suffix].append(func_name)
         
@@ -225,8 +237,8 @@ class FunctionMappingDialog(QDialog):
         current = self.buildings_tree.currentItem()
         if not current or not current.parent():
             return
-        func_name = current.data(0, Qt.UserRole)
-        suffix = current.parent().data(0, Qt.UserRole)
+        func_name = current.data(0, Qt.ItemDataRole.UserRole)
+        suffix = current.parent().data(0, Qt.ItemDataRole.UserRole)
         if func_name in self.mapping.get(suffix, []):
             self.mapping[suffix].remove(func_name)
         self.update_trees()
@@ -268,11 +280,11 @@ class FunctionMappingDialog(QDialog):
     def update_trees(self):
         for i in range(self.buildings_tree.topLevelItemCount()):
             item = self.buildings_tree.topLevelItem(i)
-            suffix = item.data(0, Qt.UserRole)
+            suffix = item.data(0, Qt.ItemDataRole.UserRole)
             item.takeChildren()
             for func in self.mapping.get(suffix, []):
                 child = QTreeWidgetItem([func, str(self.available_functions.get(func, 0))])
-                child.setData(0, Qt.UserRole, func)
+                child.setData(0, Qt.ItemDataRole.UserRole, func)
                 item.addChild(child)
             item.setExpanded(True)
         
@@ -282,7 +294,7 @@ class FunctionMappingDialog(QDialog):
         
         for i in range(self.functions_list.count()):
             item = self.functions_list.item(i)
-            func = item.data(Qt.UserRole)
+            func = item.data(Qt.ItemDataRole.UserRole)
             count = self.available_functions.get(func, 0)
             if func in assigned:
                 item.setBackground(QColor("#c8e6c9"))
@@ -303,39 +315,77 @@ class FunctionMappingDialog(QDialog):
 
 
 def create_budynki_pivot(budynki_df, suffix, functions_filter):
+    """
+    Zestawienie budynkow w granicach kazdej dzialki obszaru analizowanego.
+
+    Parametry budynkow NIE sa juz usredniane - trafiaja do tabeli jako lista,
+    tak jak dotad rodzaj dachu i kat nachylenia polaci. Kolejnosc wartosci
+    w kazdej z czterech kolumn jest ta sama, wiec n-ta pozycja w kazdej z nich
+    opisuje ten sam budynek. Braki oznaczane sa jako "b.d.", zeby listy sie
+    nie rozjechaly.
+
+    Obok kolumn prezentacyjnych zwracane sa kolumny pomocnicze `_sr_*`
+    ze srednia na dzialke. Na nich liczone sa wskazniki w create_results(),
+    dzieki czemu wartosci trafiajace do decyzji pozostaja takie jak dotychczas.
+    Kolumny `_sr_*` sa usuwane przed zapisem arkusza (patrz PODMIANA 3).
+    """
     if functions_filter:
         filtered = budynki_df[budynki_df['rodzaj_zabudowy'].isin(functions_filter)].copy()
     else:
         filtered = budynki_df.copy()
-    
+
     if filtered.empty or 'ID_DZIALKI' not in filtered.columns:
         return pd.DataFrame()
-    
-    def safe_mean(x):
+
+    BRAK = "b.d."
+
+    def srednia(x):
+        """Srednia na dzialke - wylacznie do wskaznikow, nie do tabeli."""
         vals = pd.to_numeric(x, errors='coerce').dropna()
         return vals.mean() if len(vals) > 0 else None
-    
-    def safe_join(x):
-        return '; '.join([str(v) for v in x if pd.notna(v)])
-    
-    agg = {}
+
+    def lista_liczb(x):
+        """Lista wartosci liczbowych, po jednej na budynek: '3,47; 5,20'."""
+        czesci = []
+        for v in pd.to_numeric(x, errors='coerce'):
+            czesci.append(BRAK if pd.isna(v) else f"{float(v):.2f}".replace('.', ','))
+        return '; '.join(czesci)
+
+    def lista_tekstow(x):
+        """Lista wartosci tekstowych, po jednej na budynek: 'plaski; dwuspadowy'."""
+        return '; '.join(BRAK if pd.isna(v) else str(v) for v in x)
+
+    def lista_calkowitych(x):
+        """Lista wartosci calkowitych (katy nachylenia): '5; 0; 30'."""
+        czesci = []
+        for v in pd.to_numeric(x, errors='coerce'):
+            czesci.append(BRAK if pd.isna(v) else str(int(round(float(v)))))
+        return '; '.join(czesci)
+
+    # Nazwane agregacje: z jednej kolumny zrodlowej robimy liste (do tabeli)
+    # i srednia (do wskaznikow).
+    agg_spec = {}
     if 'szer_elew_front' in filtered.columns:
-        agg['szer_elew_front'] = safe_mean
+        agg_spec['szer_elew_front'] = ('szer_elew_front', lista_liczb)
+        agg_spec['_sr_szer_elew_front'] = ('szer_elew_front', srednia)
     if 'wysokosc' in filtered.columns:
-        agg['wysokosc'] = safe_mean
-    if 'nachylenie' in filtered.columns:
-        agg['nachylenie'] = safe_join
+        agg_spec['wysokosc'] = ('wysokosc', lista_liczb)
+        agg_spec['_sr_wysokosc'] = ('wysokosc', srednia)
+    if 'nachylenie_przedzial' in filtered.columns:
+        agg_spec['nachylenie'] = ('nachylenie_przedzial', lista_tekstow)
+    elif 'nachylenie' in filtered.columns:
+        agg_spec['nachylenie'] = ('nachylenie', lista_calkowitych)
     if 'Kategoria' in filtered.columns:
-        agg['Kategoria'] = safe_join
-    
-    if not agg:
+        agg_spec['Kategoria'] = ('Kategoria', lista_tekstow)
+
+    if not agg_spec:
         return pd.DataFrame()
-    
-    grouped = filtered.groupby('ID_DZIALKI').agg(agg).reset_index()
-    
+
+    grouped = filtered.groupby('ID_DZIALKI').agg(**agg_spec).reset_index()
+
     new_cols = ['ID_DZIALKI'] + [f"{c}_{suffix}" for c in grouped.columns[1:]]
     grouped.columns = new_cols
-    
+
     return grouped
 
 
@@ -512,6 +562,21 @@ def parse_identyfikator_dzialki(identyfikator):
     return numery_dzialek_str, numery_obrebow_str
 
 
+def wartosci_budynkow(budynki_df, functions, kolumna, id_dzialek=None):
+    """Wartości parametru dla POJEDYNCZYCH budynków (nie średnich na działkę).
+    Filtr: funkcje z mapowania + działki z tabeli obszaru. Wartości <= 0
+    i puste pomijane (brak pomiaru / budynek bez elewacji frontowej)."""
+    if kolumna not in budynki_df.columns:
+        return pd.Series(dtype=float)
+    df = budynki_df
+    if functions and 'rodzaj_zabudowy' in df.columns:
+        df = df[df['rodzaj_zabudowy'].isin(functions)]
+    if id_dzialek is not None and 'ID_DZIALKI' in df.columns:
+        df = df[df['ID_DZIALKI'].isin(id_dzialek)]
+    vals = pd.to_numeric(df[kolumna], errors='coerce').dropna()
+    return vals[vals > 0]
+
+
 def create_results(output_table, mapping, budynki_df):
     results = []
     # MAKSYMALNE WIZ I WNIZ występujące w obszarze analizowanym
@@ -536,32 +601,94 @@ def create_results(output_table, mapping, budynki_df):
     results.append({'nazwa_pola': 'wpbc_min', 'wartosc': f"{int(calc_min(output_table, 'wpbc_float') * 100)}%"})
     results.append({'nazwa_pola': 'wpbc_max', 'wartosc': f"{int(calc_max(output_table, 'wpbc_float') * 100)}%"})
     
-    for suffix in mapping.keys():
-        szer_col = f'szerokość elewacji frontowej [m]_{suffix}'
-        wys_col = f'wysokość zabudowy [m]_{suffix}'
-        
-        if szer_col in output_table.columns:
-            sr = calc_mean(output_table, szer_col)
-            results.append({'nazwa_pola': f'SrElewFront_{suffix}', 'wartosc': f"{sr} m"})
-            results.append({'nazwa_pola': f'MinszerElewFront_{suffix}', 'wartosc': f"{calc_min(output_table, szer_col)} m"})
-            results.append({'nazwa_pola': f'MaxszerElewFront_{suffix}', 'wartosc': f"{calc_max(output_table, szer_col)} m"})
-            results.append({'nazwa_pola': f'szerElewFront08_{suffix}', 'wartosc': f"{round(sr*0.8, 2)} m"})
-            results.append({'nazwa_pola': f'szerElewFront12_{suffix}', 'wartosc': f"{round(sr*1.2, 2)} m"})
-        
-        if wys_col in output_table.columns:
-            results.append({'nazwa_pola': f'srWysZab_{suffix}', 'wartosc': f"{calc_mean(output_table, wys_col)} m"})
-            results.append({'nazwa_pola': f'wys_zab_min_{suffix}', 'wartosc': f"{calc_min(output_table, wys_col)} m"})
+    # Srednia wysokosc zabudowy na dzialkach sasiednich - policzona narzedziem
+    # w oknie "Dane dzialki przedmiotowej". Jesli jest, to ONA jest podstawa
+    # ustalenia maksymalnej wysokosci nowej zabudowy; jesli nie - fallbackiem
+    # zostaje srednia z calego obszaru analizowanego (srWysZab).
+    sr_wys_sasiedzi = None
+    _dir = get_project_directory()
+    if _dir:
+        _p = Path(_dir) / "dane_dzialki_przedmiotowej.xlsx"
+        if _p.exists():
+            try:
+                _df = pd.read_excel(_p, sheet_name='do_eksportu')
+                _slownik = _df.set_index('nazwa_pola')['wartosc'].to_dict()
+                _surowa = str(_slownik.get('sr_wys_dz_sasiednie', '') or '').strip()
+                if _surowa and _surowa.lower() not in ('nie dotyczy', 'brak', '-'):
+                    _liczba = _surowa.replace(',', '.').split(' ')[0]
+                    sr_wys_sasiedzi = round(float(_liczba), 2)
+            except Exception as e:
+                print(f"⚠️ Nie udało się odczytać średniej z działek sąsiednich: {e}")
 
-            # wys_zab_max liczone bezpośrednio z budynki_df (max z budynków, nie max ze średnich per działka)
-            functions = mapping.get(suffix, [])
-            if functions and 'rodzaj_zabudowy' in budynki_df.columns and 'wysokosc' in budynki_df.columns:
-                filtered = budynki_df[budynki_df['rodzaj_zabudowy'].isin(functions)]
-                wys_vals = pd.to_numeric(filtered['wysokosc'], errors='coerce').dropna()
-                max_wys = round(wys_vals.max(), 2) if len(wys_vals) > 0 else 0
+    if sr_wys_sasiedzi is not None:
+        print(f"📏 Wysokość ustalona z działek sąsiednich: {sr_wys_sasiedzi} m")
+    else:
+        print("📏 Brak średniej z działek sąsiednich — wysokość ustalona ze średniej obszaru")
+
+    id_dzialek_obszaru = (set(output_table['id_działki'].dropna())
+                          if 'id_działki' in output_table.columns else None)
+    for suffix in mapping.keys():
+        def wybierz_kolumne(*kandydaci):
+            for nazwa in kandydaci:
+                if nazwa in output_table.columns:
+                    return nazwa
+            return None
+
+        szer_col = wybierz_kolumne(
+            f'_sr_szer_elew_front_{suffix}',
+            f'szerokość elewacji frontowej [m]_{suffix}',
+        )
+        wys_col = wybierz_kolumne(
+            f'_sr_wysokosc_{suffix}',
+            f'wysokość zabudowy [m]_{suffix}',
+        )
+
+        # --- SZEROKOŚĆ ELEWACJI FRONTOWEJ ---
+        if szer_col:
+            szer_vals = wartosci_budynkow(budynki_df, mapping.get(suffix, []), 'szer_elew_front', id_dzialek_obszaru)
+            if len(szer_vals) > 0:
+                sr = round(szer_vals.mean(), 2)
+                min_szer = round(szer_vals.min(), 2)
+                max_szer = round(szer_vals.max(), 2)
             else:
-                max_wys = calc_max(output_table, wys_col)  # fallback gdyby czegoś brakowało
+                sr = calc_mean(output_table, szer_col)
+                min_szer = calc_min(output_table, szer_col)
+                max_szer = calc_max(output_table, szer_col)
+
+            results.append({'nazwa_pola': f'SrElewFront_{suffix}', 'wartosc': f"{sr} m"})
+            results.append({'nazwa_pola': f'MinszerElewFront_{suffix}', 'wartosc': f"{min_szer} m"})
+            results.append({'nazwa_pola': f'MaxszerElewFront_{suffix}', 'wartosc': f"{max_szer} m"})
+            results.append({'nazwa_pola': f'szerElewFront08_{suffix}', 'wartosc': f"{round(sr * 0.8, 2)} m"})
+            results.append({'nazwa_pola': f'szerElewFront12_{suffix}', 'wartosc': f"{round(sr * 1.2, 2)} m"})
+
+        # --- WYSOKOŚĆ ZABUDOWY ---
+        if wys_col:
+            wys_vals = wartosci_budynkow(budynki_df, mapping.get(suffix, []), 'wysokosc', id_dzialek_obszaru)
+            if len(wys_vals) > 0:
+                sr_wys = round(wys_vals.mean(), 2)
+                min_wys = round(wys_vals.min(), 2)
+                max_wys = round(wys_vals.max(), 2)
+            else:
+                sr_wys = calc_mean(output_table, wys_col)
+                min_wys = calc_min(output_table, wys_col)
+                max_wys = calc_max(output_table, wys_col)
+
+            results.append({'nazwa_pola': f'srWysZab_{suffix}', 'wartosc': f"{sr_wys} m"})
+            results.append({'nazwa_pola': f'wys_zab_min_{suffix}', 'wartosc': f"{min_wys} m"})
             results.append({'nazwa_pola': f'wys_zab_max_{suffix}', 'wartosc': f"{max_wys} m"})
-            
+
+            # Maksymalna wysokosc USTALONA dla nowej zabudowy:
+            # srednia z dzialek sasiednich, a gdy jej brak - srednia ze wszystkich budynkow w obszarze.
+            if sr_wys_sasiedzi is not None:
+                wys_ustalona = sr_wys_sasiedzi
+                zrodlo_wys = 'działki sąsiednie'
+            else:
+                wys_ustalona = sr_wys
+                zrodlo_wys = 'obszar analizowany'
+            results.append({'nazwa_pola': f'wys_ustalona_{suffix}', 'wartosc': f"{wys_ustalona} m"})
+            results.append({'nazwa_pola': f'wys_ustalona_zrodlo_{suffix}', 'wartosc': zrodlo_wys})
+
+
     # === POBIERZ IDENTYFIKATOR DZIAŁKI PRZEDMIOTOWEJ ===
     # Wczytaj z pliku dane_dzialki_przedmiotowej.xlsx
     project_directory = get_project_directory()
@@ -678,18 +805,24 @@ def create_results(output_table, mapping, budynki_df):
 
 def generate_roof_stats(budynki_df, mapping):
     stats = []
+    ma_przedzialy = {'nachylenie_od', 'nachylenie_do'}.issubset(budynki_df.columns)
     for suffix, functions in mapping.items():
         filtered = budynki_df[budynki_df['rodzaj_zabudowy'].isin(functions)]
         roof_data = {}
         for _, row in filtered.iterrows():
             kat = str(row.get('Kategoria', 'nieznany')).strip() or 'nieznany'
-            nach = int(row.get('nachylenie', 0))
-            if kat not in roof_data:
-                roof_data[kat] = {'count': 0, 'min': nach, 'max': nach}
-            roof_data[kat]['count'] += 1
-            roof_data[kat]['min'] = min(roof_data[kat]['min'], nach)
-            roof_data[kat]['max'] = max(roof_data[kat]['max'], nach)
-        
+            if ma_przedzialy:
+                lo, hi = row['nachylenie_od'], row['nachylenie_do']
+            else:
+                lo = hi = row.get('nachylenie', 0)
+            d = roof_data.setdefault(kat, {'count': 0, 'min': None, 'max': None})
+            d['count'] += 1
+            if pd.isna(lo) or pd.isna(hi):
+                continue  # budynek liczony w typie dachu, ale bez kąta
+            lo, hi = int(lo), int(hi)
+            d['min'] = lo if d['min'] is None else min(d['min'], lo)
+            d['max'] = hi if d['max'] is None else max(d['max'], hi)
+
         for kat, d in roof_data.items():
             stats.append({
                 'suffix': suffix,
@@ -712,9 +845,7 @@ def create_geom_dachow_text(roof_df, suffix):
     for _, row in df.iterrows():
         kat = row['Kategoria']
         n = row['liczba_wystapien']
-        mi = int(row['min_nachylenie'])
-        ma = int(row['max_nachylenie'])
-        
+
         pct = (n / total) * 100
         if pct > 50:
             pre = "występują przeważnie dachy typu"
@@ -722,6 +853,12 @@ def create_geom_dachow_text(roof_df, suffix):
             pre = "sporadycznie występują dachy typu"
         else:
             pre = "występują dachy typu"
+
+        if pd.isna(row['min_nachylenie']) or pd.isna(row['max_nachylenie']):
+            opisy.append(f"{'występują' if pct >= 10 else 'sporadycznie występują'} dachy typu {kat}")
+            continue
+        mi = int(row['min_nachylenie'])
+        ma = int(row['max_nachylenie'])
         
         if mi == ma:
             opisy.append(f"{pre} {kat} o kącie nachylenia połaci dachowych ok. {mi} stopni")
@@ -811,6 +948,14 @@ def process_layers_unified():
     budynki_df = layer_to_dataframe(budynki_layer)
     budynki_df['nachylenie'] = pd.to_numeric(budynki_df['nachylenie'], errors='coerce').fillna(0).astype(int)
     
+    # Kąt jako przedział / liczba (z oblicz_parametry_budynkow.py)
+    for kol in ('nachylenie_od', 'nachylenie_do'):
+        if kol in budynki_df.columns:
+            budynki_df[kol] = pd.to_numeric(budynki_df[kol].astype(str), errors='coerce')
+    if 'nachylenie_przedzial' in budynki_df.columns:
+        budynki_df['nachylenie_przedzial'] = budynki_df['nachylenie_przedzial'].map(
+            lambda v: None if v is None or str(v) in ('', 'NULL', 'None') else str(v))
+
     planned = get_planned_buildings_from_file(project_directory)
     if not planned:
         planned = [{'suffix': 'x', 'funkcja': 'budynek', 'liczba': 1}]
@@ -822,7 +967,7 @@ def process_layers_unified():
     
     # Dialog mapowania
     dialog = FunctionMappingDialog(available_functions, planned)
-    if dialog.exec_() != QDialog.Accepted:
+    if dialog.exec() != QDialog.DialogCode.Accepted:
         print("⚠️ Anulowano")
         return False
     
@@ -890,7 +1035,12 @@ def process_layers_unified():
     # Zapisz
     output_path = os.path.join(project_directory, "analiza_wz_kompletna.xlsx")
     with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-        output_table.to_excel(writer, sheet_name='output_table', index=False)
+        # Kolumny pomocnicze `_sr_*` sluza tylko do wyliczenia wskaznikow
+        # w create_results() - do arkusza nie trafiaja.
+        output_table_do_zapisu = output_table.drop(
+            columns=[c for c in output_table.columns if c.startswith('_sr_')]
+        )
+        output_table_do_zapisu.to_excel(writer, sheet_name='output_table', index=False)
         results_df.to_excel(writer, sheet_name='results', index=False)
         dane_df.to_excel(writer, sheet_name='dane_dzialki', index=False)
         eksport_df.to_excel(writer, sheet_name='do_eksportu', index=False)

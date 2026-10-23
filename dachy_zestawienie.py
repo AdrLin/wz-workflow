@@ -1,4 +1,15 @@
-import pandas as pd
+
+# Ciezkie biblioteki — czytelny komunikat zamiast surowego bledu importu.
+try:
+    import pandas as pd
+except ImportError as _exc:
+    raise ImportError(
+        "Ten krok wymaga bibliotek naukowych (numpy/pandas/scipy). "
+        "Zainstaluj je w srodowisku Pythona QGIS:  "
+        "python3 -m pip install numpy pandas scipy scikit-learn joblib\n"
+        f"Szczegoly: {_exc}"
+    ) from _exc
+
 import os
 from qgis.core import QgsProject
 from pathlib import Path

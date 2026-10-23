@@ -35,7 +35,7 @@ if temp_layer:
     )
     
     # Sprawdź wynik zapisu
-    if result[0] == QgsVectorFileWriter.NoError:
+    if result[0] == QgsVectorFileWriter.WriterError.NoError:
         print(f"Warstwa została pomyślnie zapisana do: {output_path}")
         
         # Usuń starą warstwę tymczasową z projektu

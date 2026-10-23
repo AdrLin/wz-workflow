@@ -11,7 +11,7 @@ from qgis.core import (
     QgsProject, QgsField, QgsVectorLayer, QgsFeature, QgsFields,
     QgsVectorFileWriter, QgsCoordinateTransformContext
 )
-from PyQt5.QtWidgets import QMessageBox
+from qgis.PyQt.QtWidgets import QMessageBox
 from qgis.PyQt.QtCore import QVariant
 from qgis.utils import iface
 
@@ -70,8 +70,8 @@ class LineMeasurementController:
             try:
                 self.measurement_layer.featureAdded.disconnect()
                 self.measurement_layer.geometryChanged.disconnect()
-            except:
-                pass  # Ignoruj jeśli nie były podłączone
+            except Exception:
+                pass  # nosec B110 - celowe: sygnal moze nie byc podlaczony
             
             # Podłącz sygnały z zabezpieczeniami
             self.measurement_layer.featureAdded.connect(self.safe_on_feature_added)

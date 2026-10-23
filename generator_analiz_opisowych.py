@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+# Ciezkie biblioteki — czytelny komunikat zamiast surowego bledu importu.
+try:
+    import pandas as pd
+except ImportError as _exc:
+    raise ImportError(
+        "Ten krok wymaga bibliotek naukowych (numpy/pandas/scipy). "
+        "Zainstaluj je w srodowisku Pythona QGIS:  "
+        "python3 -m pip install numpy pandas scipy scikit-learn joblib\n"
+        f"Szczegoly: {_exc}"
+    ) from _exc
+
 """
 generator_analiz_opisowych_v4.py
 
@@ -10,8 +22,7 @@ Wersja 4.0 - UNIFIED
 - Obsługa wielu budynków o różnych funkcjach
 """
 
-from PyQt5.QtWidgets import QFileDialog, QMessageBox
-import pandas as pd
+from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox
 from datetime import datetime
 import os
 import re
@@ -25,9 +36,54 @@ project_directory = os.path.dirname(project_path) if project_path else os.getcwd
 
 try:
     from docxtpl import DocxTemplate
-except Exception:
-    os.system("pip install docxtpl")
-    from docxtpl import DocxTemplate
+except ImportError as exc:
+    # NIE instalujemy pakietow automatycznie przez powloke (os.system) —
+    # to niebezpieczne i nieprzewidywalne. Uzytkownik instaluje zaleznosc sam.
+    raise ImportError(
+        "Brak biblioteki 'docxtpl', wymaganej do generowania raportow Word.\n"
+        "Zainstaluj ja w srodowisku Pythona QGIS, np.:\n"
+        "    python3 -m pip install docxtpl"
+    ) from exc
+
+
+def _plan_ogolny():
+    """
+    Leniwy import modulu plan_ogolny.py.
+    Skrypt jest uruchamiany przez runpy (nie jako modul pakietu), wiec
+    import wzgledny nie zadziala — ladujemy plik po sciezce.
+    """
+    try:
+        from . import plan_ogolny as _pog  # gdyby kiedys byl importowany jako modul
+        return _pog
+    except Exception:  # nosec B110
+        pass
+    import importlib.util
+    sciezka = os.path.join(SCRIPTS_PATH, "plan_ogolny.py")
+    if not os.path.exists(sciezka):
+        raise ImportError(f"Brak pliku {sciezka} — wymagany do obslugi planu ogolnego.")
+    spec = importlib.util.spec_from_file_location("wz_plan_ogolny", sciezka)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def szablon_uzywa_planu_ogolnego(template_path):
+    """
+    Czy wybrany szablon zawiera placeholdery planu ogolnego?
+
+    Pozwala uzywac starych szablonow (wnioski zlozone przed uchwaleniem planu
+    ogolnego, rozpatrywane na dotychczasowych zasadach) bez zbednych ostrzezen
+    o braku danych z planu.
+    """
+    import zipfile
+    znaczniki = ("pog_strefa", "pog_ocena", "zakres_wystepujaca",
+                 "podstawa_ustalen_zdanie")
+    try:
+        with zipfile.ZipFile(template_path) as z:
+            xml = z.read("word/document.xml").decode("utf-8", "ignore")
+    except Exception:
+        return False
+    return any(z in xml for z in znaczniki)
 
 
 def is_temporary_excel(fname):
@@ -55,8 +111,9 @@ def auto_find_unified_file(search_dir):
                 xls = pd.ExcelFile(path)
                 if 'do_eksportu' in xls.sheet_names:
                     return path
-            except:
-                pass
+            except Exception:
+                # celowo ignorowane: operacja best-effort (np. odlaczenie sygnalu, ktory moze nie byc podlaczony)
+                pass  # nosec B110
     
     # Fallback: szukaj pliku z arkuszem do_eksportu
     try:
@@ -67,10 +124,12 @@ def auto_find_unified_file(search_dir):
                     xls = pd.ExcelFile(path)
                     if 'do_eksportu' in xls.sheet_names:
                         return path
-                except:
-                    pass
-    except:
-        pass
+                except Exception:
+                    # celowo ignorowane: operacja best-effort (np. odlaczenie sygnalu, ktory moze nie byc podlaczony)
+                    pass  # nosec B110
+    except Exception:
+        # celowo ignorowane: operacja best-effort (np. odlaczenie sygnalu, ktory moze nie byc podlaczony)
+        pass  # nosec B110
     
     return None
 
@@ -175,6 +234,13 @@ def group_building_data(data_dict, suffixes):
             'wys_zab_min': safe_str(data_dict.get(f'wys_zab_min_{suffix}', '')),
             'wys_zab_max': safe_str(data_dict.get(f'wys_zab_max_{suffix}', '')),
             'srWysZab': safe_str(data_dict.get(f'srWysZab_{suffix}', '')),
+            # Maksymalna wysokość USTALONA dla nowej zabudowy — średnia z działek
+            # sąsiednich policzona narzędziem w oknie danych działki, a gdy jej
+            # nie policzono, średnia z całego obszaru (fallback już w xlsx).
+            'wys_ustalona': safe_str(data_dict.get(
+                f'wys_ustalona_{suffix}', data_dict.get(f'srWysZab_{suffix}', ''))),
+            'wys_ustalona_zrodlo': safe_str(data_dict.get(
+                f'wys_ustalona_zrodlo_{suffix}', '')),
             
             # === GEOMETRIA DACHÓW Z ANALIZY OBSZARU ===
             # KLUCZOWA ZMIANA: używamy suffixu _x, _y, _z (NIE _0, _1, _2!)
@@ -369,6 +435,60 @@ def generate_document():
         context['liczba_budynkow_total'] = totals['suma_liczba_budynkow']
         context['czy_wiele_budynkow'] = len(buildings) > 1
         context['czy_wiele_typow'] = len(buildings) > 1
+
+        # ============================================
+        # 7b) PLAN OGOLNY — automat wyborow w szablonie
+        # ============================================
+        # Szablony "..._POG_2026.docx" zawieraja warianty rozdzielone "/"
+        # (np. "jest nie wieksza/jest wieksza"). Ponizsza funkcja:
+        #   - przepisuje wybory dokonane w oknie "Dane dzialki przedmiotowej"
+        #     (§ 2 ust. 2/3, § 3 ust. 1/2/3, § 7 ust. 1-2/3, zgodnosc funkcji),
+        #   - automatycznie porownuje parametry ustalone w decyzji z parametrami
+        #     strefy planistycznej i wybiera wlasciwa fraze.
+        szablon_pog = szablon_uzywa_planu_ogolnego(template_path)
+
+        try:
+            _pog = _plan_ogolny()
+            _pog.uzupelnij_wybory(context, buildings)
+        except Exception as e:
+            print(f"⚠️ Nie udało się uzupełnić ustaleń planu ogólnego: {e}")
+            traceback.print_exc()
+
+        if not szablon_pog:
+            # Stary szablon (sprzed planu ogólnego) — zmienne pog_* są w kontekście,
+            # ale szablon ich nie używa. Nie zawracamy użytkownikowi głowy.
+            print("\nℹ️ Wybrano szablon sprzed planu ogólnego "
+                  "— ustalenia planu nie będą wstawiane do dokumentu.")
+        else:
+            print("\n🗺️ Plan ogólny:")
+            print(f"   strefa: {context.get('pog_strefa_oznaczenie', '—')} "
+                  f"({context.get('pog_strefa_nazwa_mian', context.get('pog_strefa_nazwa', '—'))})")
+            print(f"   podstawa ustaleń: {context.get('podstawa_ustalen', '—')} rozporządzenia")
+            print(f"   nadziemna intensywność: {context.get('maks_nadz_inten_zab_inw', '—')} "
+                  f"vs {context.get('pog_maks_nadz_intens', '—')} → {context.get('pog_ocena_nadz_intens', '—')}")
+            print(f"   udział pow. zabudowy:   {context.get('Sredni_wpz', '—')} "
+                  f"vs {context.get('pog_maks_udzial_pow_zab', '—')} → {context.get('pog_ocena_udzial_pow_zab', '—')}")
+            print(f"   wysokość zabudowy:      vs {context.get('pog_maks_wysokosc', '—')} "
+                  f"→ {context.get('pog_ocena_wysokosc', '—')}")
+            print(f"   udział PBC:             {context.get('Sredni_wpbc', '—')} "
+                  f"vs {context.get('pog_min_pbc', '—')} → {context.get('pog_ocena_pbc', '—')}")
+
+            ostrzezenia = list(context.get('pog_ostrzezenia') or [])
+            if str(context.get('pog_dostepny', 'nie')) != 'tak':
+                ostrzezenia.insert(0, (
+                    "NIE ODCZYTANO STREFY PLANISTYCZNEJ — w dokumencie pojawią się "
+                    "wielokropki zamiast ustaleń planu. Wczytaj warstwy planu ogólnego "
+                    "i powtórz krok „Dane działki”."
+                ))
+            for o in ostrzezenia:
+                print(f"   ⚠️ {o}")
+            if ostrzezenia:
+                QMessageBox.warning(
+                    None,
+                    "Plan ogólny — sprawdź analizę",
+                    "Automat wykrył następujące kwestie:\n\n• " + "\n• ".join(ostrzezenia) +
+                    "\n\nDokument zostanie wygenerowany, ale zweryfikuj powyższe punkty."
+                )
 
         # ============================================
         # 8) RENDERUJ SZABLON

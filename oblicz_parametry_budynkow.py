@@ -11,17 +11,33 @@ from qgis.core import (QgsProject, QgsVectorLayer, QgsFeature, QgsWkbTypes,QgsGr
     QgsFields, QgsField, QgsGraduatedSymbolRenderer, QgsRendererRange,QgsMarkerSymbol, 
     )
 from pathlib import Path
-from PyQt5.QtCore import QVariant
-from PyQt5.QtGui import QColor
-import pandas as pd
-import numpy as np
-from sklearn.cluster import DBSCAN
-from sklearn.linear_model import RANSACRegressor
-from sklearn.preprocessing import StandardScaler
-from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
+from qgis.PyQt.QtCore import QVariant
+from qgis.PyQt.QtGui import QColor
+
+# Ciezkie biblioteki naukowe. Czytelny komunikat zamiast surowego bledu,
+# gdy srodowisko QGIS ich nie ma albo ma niespojne numpy/scipy.
+try:
+    import pandas as pd
+    import numpy as np
+    from sklearn.cluster import DBSCAN
+    from sklearn.linear_model import RANSACRegressor
+    from sklearn.preprocessing import StandardScaler
+    from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
+except ImportError as _exc:
+    raise ImportError(
+        "Ten krok wymaga bibliotek: numpy, pandas, scipy, scikit-learn.\\n"
+        "Zainstaluj je w srodowisku Pythona QGIS, np.:\\n"
+        "    python3 -m pip install numpy pandas scipy scikit-learn\\n\\n"
+        f"Szczegoly: {_exc}"
+    ) from _exc
 from qgis.utils import iface
 import os
 import gc  # Garbage collector dla zarządzania pamięcią
+
+RNG_SEED = 42
+KROK_PRZEDZIALU = 5           # [°]
+MARGINES_GRANICY = 1.5       # [°] bliżej granicy niż to → zapis liczby zamiast przedziału
+KAT_PLASKI = 2.5              # [°]
 
 SCRIPTS_PATH = os.path.dirname(os.path.abspath(__file__))
 
@@ -256,44 +272,51 @@ def analyze_roof_slope_from_point_cloud(points_df, building_id):
     if not roof_planes:
         return {"slope": 0, "confidence": 0, "method": "no_planes_found"}
     
-    # === KROK 3: Oblicz nachylenie dla każdej płaszczyzny ===
-    plane_slopes = []
-    plane_confidences = []
-    
+    # === KROK 3: nachylenie każdej płaszczyzny (także płaskich!) ===
+    plane_results = []  # (liczba_punktów, nachylenie, pewność)
     for plane_points in roof_planes:
         if len(plane_points) < 10:
             continue
-            
         slope_info = calculate_plane_slope_robust(plane_points)
-        if slope_info and slope_info['slope'] > 0:
-            plane_slopes.append(slope_info['slope'])
-            plane_confidences.append(slope_info['confidence'])
-    
-    if len(plane_slopes) == 0:
-        fallback_slope = calculate_overall_slope(cleaned_points)
-        return { 
-            "slope": fallback_slope,
+        if slope_info is None:
+            continue
+        plane_results.append((len(plane_points), slope_info['slope'], slope_info['confidence']))
+
+    if not plane_results:
+        return {
+            "slope": calculate_overall_slope(cleaned_points),
             "confidence": 0.5,
             "method": "fallback_overall_accepted",
-            "num_points": len(cleaned_points)
+            "num_points": len(cleaned_points),
+            "udzial_dominujacej": 0.0,
         }
-    
-    # === KROK 4: Wybierz najlepsze nachylenie ===
-    if len(plane_slopes) == 1:
-        plane_slopes.sort(reverse=True)
-        final_slope = plane_slopes[0]
-        confidence = plane_confidences[0]
-    else:
-        weights = np.array(plane_confidences)
-        final_slope = np.average(plane_slopes, weights=weights)
-        confidence = np.mean(plane_confidences)
-    
+
+    # === KROK 4: połać dominująca = segment z największą liczbą punktów ===
+    n_dom, final_slope, confidence = max(plane_results, key=lambda p: p[0])
+    udzial = n_dom / sum(p[0] for p in plane_results)
+
     return {
         "slope": final_slope,
         "confidence": confidence,
-        "method": f"multi_plane_{len(plane_slopes)}",
-        "num_points": len(cleaned_points)
+        "method": f"dominant_of_{len(plane_results)}",
+        "num_points": len(cleaned_points),
+        "udzial_dominujacej": udzial,
     }
+
+
+def przedzial_nachylenia(slope):
+    """
+    Zwraca (od, do, etykieta).
+    Blisko wielokrotności KROK_PRZEDZIALU → liczba, np. (30, 30, "30").
+    Daleko od granicy → przedział [od, do), np. (20, 25, "20-25").
+    """
+    s = round(float(slope), 1)
+    najblizsza = int(round(s / KROK_PRZEDZIALU) * KROK_PRZEDZIALU)
+    if abs(s - najblizsza) < MARGINES_GRANICY:
+        return najblizsza, najblizsza, str(najblizsza)
+    od = int(np.floor(s / KROK_PRZEDZIALU) * KROK_PRZEDZIALU)
+    do = od + KROK_PRZEDZIALU
+    return od, do, f"{od}-{do}"
 
 
 def clean_point_cloud(points):
@@ -324,7 +347,7 @@ def segment_roof_planes(points):
     # OPTYMALIZACJA: Sampling dla bardzo dużych zbiorów
     if len(points) > MAX_POINTS_FOR_DBSCAN:
         print(f"📊 DBSCAN: Sampling {MAX_POINTS_FOR_DBSCAN} z {len(points)} punktów...")
-        indices = np.random.choice(len(points), MAX_POINTS_FOR_DBSCAN, replace=False)
+        indices = np.random.default_rng(RNG_SEED).choice(len(points), MAX_POINTS_FOR_DBSCAN, replace=False)
         points_sampled = points[indices]
     else:
         points_sampled = points
@@ -401,7 +424,7 @@ def calculate_plane_slope_robust(points):
     # ZABEZPIECZENIE 1: Sampling dla dużych zbiorów
     if len(points) > MAX_POINTS_FOR_RANSAC:
         print(f"📊 RANSAC: Sampling {MAX_POINTS_FOR_RANSAC} z {len(points)} punktów...")
-        indices = np.random.choice(len(points), MAX_POINTS_FOR_RANSAC, replace=False)
+        indices = np.random.default_rng(RNG_SEED).choice(len(points), MAX_POINTS_FOR_RANSAC, replace=False)
         points_sampled = points[indices]
     else:
         points_sampled = points
@@ -490,7 +513,7 @@ def calculate_plane_slope_simple(points):
     
     # Sampling jeśli wciąż za dużo punktów
     if len(points) > 1000:
-        indices = np.random.choice(len(points), 1000, replace=False)
+        indices = np.random.default_rng(RNG_SEED).choice(len(points), 1000, replace=False)
         points = points[indices]
     
     X = points[:, :2]
@@ -611,14 +634,20 @@ def process_buildings_roof_slopes(points_layer):
     gc.collect()
     
     # Dodaj pola do warstwy budynków
-    if 'nachylenie_chmura' not in [field.name() for field in buildings_layer.fields()]:
-        buildings_layer.startEditing()
-        buildings_layer.dataProvider().addAttributes([
-            QgsField('nachylenie_chmura', QVariant.Double),
-            QgsField('pewnosc_nachylenia', QVariant.Double),
-            QgsField('metoda_nachylenia', QVariant.String),
-            QgsField('liczba_punktow', QVariant.Int)
-        ])
+    pola_nachylenia = [
+        ('nachylenie_chmura', QVariant.Double),     # surowy kąt, 0,1°
+        ('pewnosc_nachylenia', QVariant.Double),
+        ('metoda_nachylenia', QVariant.String),
+        ('liczba_punktow', QVariant.Int),
+        ('udzial_polaci_dom', QVariant.Double),     # udział połaci dominującej w punktach dachu
+        ('nachylenie_od', QVariant.Int),
+        ('nachylenie_do', QVariant.Int),
+        ('nachylenie_przedzial', QVariant.String),  # "25-30"
+    ]
+    istniejace = [f.name() for f in buildings_layer.fields()]
+    brakujace = [QgsField(n, t) for n, t in pola_nachylenia if n not in istniejace]
+    if brakujace:
+        buildings_layer.dataProvider().addAttributes(brakujace)
         buildings_layer.updateFields()
     
     buildings_layer.startEditing()
@@ -640,37 +669,31 @@ def process_buildings_roof_slopes(points_layer):
         else:
             slope_info = analyze_roof_slope_from_point_cloud(building_points, building_id)
         
-        # Zaokrąglij nachylenie
-        slope = slope_info.get('slope', 0)
-        if slope is None:
-            slope = 0
-        if slope > 2.5:
-            slope = round(slope / 5) * 5
-        else:
-            slope = round(slope, 1)
-            continue
+        # Zapis wyników
+        slope = slope_info.get('slope', 0) or 0
+        if slope <= KAT_PLASKI:
+            slope = 0.0
 
-        # Zapisz wyniki
-        buildings_layer.changeAttributeValue(
-            building_feature.id(),
-            buildings_layer.fields().indexOf('nachylenie_chmura'),
-            slope
-        )
-        buildings_layer.changeAttributeValue(
-            building_feature.id(),
-            buildings_layer.fields().indexOf('pewnosc_nachylenia'),
-            round(slope_info.get('confidence', 0), 2)
-        )
-        buildings_layer.changeAttributeValue(
-            building_feature.id(),
-            buildings_layer.fields().indexOf('metoda_nachylenia'),
-            slope_info.get('method', 'unknown')
-        )
-        buildings_layer.changeAttributeValue(
-            building_feature.id(),
-            buildings_layer.fields().indexOf('liczba_punktow'),
-            slope_info.get('num_points', 0)
-        )
+        metoda = str(slope_info.get('method', 'unknown'))
+        brak_danych = metoda.startswith(('insufficient', 'no_planes'))
+        if brak_danych:
+            od = do = przedzial = None
+        else:
+            od, do, przedzial = przedzial_nachylenia(slope)
+
+        wartosci = {
+            'nachylenie_chmura': None if brak_danych else round(float(slope), 1),
+            'pewnosc_nachylenia': round(float(slope_info.get('confidence', 0)), 2),
+            'metoda_nachylenia': metoda,
+            'liczba_punktow': int(slope_info.get('num_points', 0)),
+            'udzial_polaci_dom': round(float(slope_info.get('udzial_dominujacej', 0)), 2),
+            'nachylenie_od': od,
+            'nachylenie_do': do,
+            'nachylenie_przedzial': przedzial,
+        }
+        for nazwa, wartosc in wartosci.items():
+            buildings_layer.changeAttributeValue(
+                building_feature.id(), buildings_layer.fields().indexOf(nazwa), wartosc)
         
         processed += 1
         if processed % 10 == 0:
@@ -1056,17 +1079,18 @@ def add_height_to_buildings_layer():
             bid = str(feat.attributes()[fld['ID_BUDYNKU']])
             if bid in height_results:
                 r = height_results[bid]
+                # rzutowanie na natywne typy (QGIS 4/Qt6 nie przyjmuje numpy)
                 target_layer.changeAttributeValue(
-                    feat.id(), fld['wysokosc'], r['wysokosc'])
+                    feat.id(), fld['wysokosc'], float(r['wysokosc']))
                 if fld.get('wys_mediana', -1) != -1:
                     target_layer.changeAttributeValue(
-                        feat.id(), fld['wys_mediana'], r['wysokosc_mediana'])
+                        feat.id(), fld['wys_mediana'], float(r['wysokosc_mediana']))
                 if fld.get('wys_metoda', -1) != -1:
                     target_layer.changeAttributeValue(
-                        feat.id(), fld['wys_metoda'], r['method'])
+                        feat.id(), fld['wys_metoda'], str(r['method']))
                 if fld.get('wys_outliers', -1) != -1:
                     target_layer.changeAttributeValue(
-                        feat.id(), fld['wys_outliers'], r['n_outliers'])
+                        feat.id(), fld['wys_outliers'], int(r['n_outliers']))
                 updated += 1
             else:
                 not_found += 1

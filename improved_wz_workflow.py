@@ -1,13 +1,14 @@
 import os
+import runpy
 import json
 from datetime import datetime
-from PyQt5.QtWidgets import (QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
+from qgis.PyQt.QtWidgets import (QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QLabel, QListWidget, QMessageBox, 
                              QTextEdit, QFrame, QScrollArea,
                              QGroupBox, QSizePolicy, QSpacerItem, QComboBox,
                              QDialog, QDialogButtonBox, QFormLayout, QLineEdit)
 
-from PyQt5.QtCore import Qt
+from qgis.PyQt.QtCore import Qt
 from qgis.core import QgsProject
 from qgis.core import (QgsVectorFileWriter,
                        QgsField, QgsVectorLayer, QgsProcessingContext,
@@ -15,12 +16,50 @@ from qgis.core import (QgsVectorFileWriter,
 )
 from qgis.PyQt.QtCore import QVariant
 from pathlib import Path
-import pandas as pd
 
-try:
-    from qgis.PyQt import sip
-except ImportError: 
-    import sip
+# pandas jest ciezka biblioteka i NIE musi byc dostepna, zeby wtyczka sie
+# zaladowala — uzywamy jej tylko w kilku krokach (eksport/import Excela).
+# Import leniwy: wtyczka wstaje nawet bez pandas, a brak biblioteki zglasza
+# sie czytelnym komunikatem dopiero przy kroku, ktory jej wymaga.
+pd = None
+def _ensure_pandas():
+    """Zwraca modul pandas; jesli go brak — rzuca czytelny blad."""
+    global pd
+    if pd is None:
+        try:
+            import pandas as _pd
+            pd = _pd
+        except ImportError as exc:
+            raise ImportError(
+                "Ten krok wymaga biblioteki 'pandas', ktorej nie znaleziono "
+                "w srodowisku Pythona QGIS.\\n"
+                "Zainstaluj ja, np.:  python3 -m pip install pandas"
+            ) from exc
+    return pd
+
+# sip: w Qt6 nie istnieje samodzielny modul `sip` (jest PyQt6.sip).
+# Kazda sciezka moze zawiesc — brak sip nie moze wywalac calej wtyczki.
+sip = None
+for _sip_source in ("qgis.PyQt", "PyQt6", "PyQt5"):
+    try:
+        _mod = __import__(_sip_source, fromlist=["sip"])
+        sip = _mod.sip
+        break
+    except (ImportError, AttributeError):
+        continue
+
+if sip is None:
+    # Ostatnia deska ratunku: samodzielny modul `sip` (stare srodowiska Qt5)
+    try:
+        import sip  # noqa: F811
+    except ImportError:
+        # Brak sip — wtyczka MUSI dzialac dalej. sip.isdeleted() sluzy tylko
+        # do sprawdzania, czy obiekt Qt zostal usuniety; zakladamy, ze zyje.
+        class _SipFallback:
+            @staticmethod
+            def isdeleted(obj):
+                return False
+        sip = _SipFallback()
         
 # Import bezpieczny dla iface
 try:
@@ -46,6 +85,44 @@ def safe_iface_call(method_name, *args, **kwargs):
 
 # Ścieżki
 SCRIPTS_PATH = os.path.dirname(os.path.abspath(__file__))
+
+
+def _narzedzia_wyboru():
+    """Leniwy import modulu narzedzia_wyboru.py (analogicznie do plan_ogolny)."""
+    try:
+        from . import narzedzia_wyboru as _nw
+        return _nw
+    except Exception:  # nosec B110
+        pass
+    import importlib.util
+    sciezka = os.path.join(SCRIPTS_PATH, "narzedzia_wyboru.py")
+    if not os.path.exists(sciezka):
+        raise ImportError(f"Brak pliku {sciezka}")
+    spec = importlib.util.spec_from_file_location("wz_narzedzia_wyboru", sciezka)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _plan_ogolny():
+    """
+    Leniwy import modulu plan_ogolny.py (odczyt strefy planistycznej + automat
+    wyborow w analizie opisowej). Import wzgledny dziala, gdy modul jest czescia
+    pakietu wtyczki; fallback laduje plik po sciezce (przydatne przy runpy).
+    """
+    try:
+        from . import plan_ogolny as _pog
+        return _pog
+    except Exception:  # nosec B110
+        pass
+    import importlib.util
+    sciezka = os.path.join(SCRIPTS_PATH, "plan_ogolny.py")
+    if not os.path.exists(sciezka):
+        raise ImportError(f"Brak pliku {sciezka}")
+    spec = importlib.util.spec_from_file_location("wz_plan_ogolny", sciezka)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 CHECKPOINT_FILE = os.path.join(SCRIPTS_PATH, 'workflow_checkpoint.json')
 
 # Style CSS
@@ -285,7 +362,7 @@ def zapisz_warstwe_do_gpkg(layer, output_directory, layer_name=None):
     options.driverName = 'GPKG'
     options.fileEncoding = 'UTF-8'
     options.layerName = layer_name
-    options.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteFile
+    options.actionOnExistingFile = QgsVectorFileWriter.ActionOnExistingFile.CreateOrOverwriteFile
     
     result = QgsVectorFileWriter.writeAsVectorFormatV3(
         layer, 
@@ -294,7 +371,7 @@ def zapisz_warstwe_do_gpkg(layer, output_directory, layer_name=None):
         options
     )
     
-    if result[0] == QgsVectorFileWriter.NoError:
+    if result[0] == QgsVectorFileWriter.WriterError.NoError:
         print(f"✅ Warstwa '{layer_name}' zapisana do: {output_path}")
         
         QgsProject.instance().removeMapLayer(layer)
@@ -358,8 +435,9 @@ class LineMeasurementController:
             try:
                 self.measurement_layer.featureAdded.disconnect()
                 self.measurement_layer.geometryChanged.disconnect()
-            except:
-                pass
+            except Exception:
+                # celowo ignorowane: operacja best-effort (np. odlaczenie sygnalu, ktory moze nie byc podlaczony)
+                pass  # nosec B110
             
             self.measurement_layer.featureAdded.connect(self.safe_on_feature_added)
             self.measurement_layer.geometryChanged.connect(self.safe_on_geometry_changed)
@@ -568,11 +646,11 @@ class FieldMappingDialog(QDialog):
         layout.addWidget(info_label)
         
         # Buttons
-        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         button_box.accepted.connect(self.validate_and_accept)
         button_box.rejected.connect(self.reject)
         
-        ok_button = button_box.button(QDialogButtonBox.Ok)
+        ok_button = button_box.button(QDialogButtonBox.StandardButton.Ok)
         ok_button.setText("✓ Zatwierdź mapowanie")
         ok_button.setMinimumHeight(40)
         
@@ -683,8 +761,8 @@ def validate_and_fix_dzialki_layer(layer, project_directory):
             layer_type="działek"
         )
         
-        result = dialog.exec_()
-        if result != QDialog.Accepted:
+        result = dialog.exec()
+        if result != QDialog.DialogCode.Accepted:
             return False, "Anulowano mapowanie pól działek"
         
         field_mapping = dialog.get_field_mapping()
@@ -776,7 +854,7 @@ def validate_and_fix_dzialki_layer(layer, project_directory):
     options.driverName = 'GPKG'
     options.fileEncoding = 'UTF-8'
     options.layerName = "dzialki_EWGiB"
-    options.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteFile
+    options.actionOnExistingFile = QgsVectorFileWriter.ActionOnExistingFile.CreateOrOverwriteFile
     
     result = QgsVectorFileWriter.writeAsVectorFormatV3(
         memory_layer, 
@@ -785,7 +863,7 @@ def validate_and_fix_dzialki_layer(layer, project_directory):
         options
     )
     
-    if result[0] == QgsVectorFileWriter.NoError:
+    if result[0] == QgsVectorFileWriter.WriterError.NoError:
         print(f"  ✅ Zapisano do: {output_path}")
         
         # Wczytaj zapisaną warstwę do projektu
@@ -868,8 +946,8 @@ def validate_and_fix_budynki_layer(layer, project_directory):
             layer_type="budynków"
         )
         
-        result = dialog.exec_()
-        if result != QDialog.Accepted:
+        result = dialog.exec()
+        if result != QDialog.DialogCode.Accepted:
             return False, "Anulowano mapowanie pól budynków"
         
         field_mapping = dialog.get_field_mapping()
@@ -1025,7 +1103,7 @@ def validate_and_fix_budynki_layer(layer, project_directory):
     options.driverName = 'GPKG'
     options.fileEncoding = 'UTF-8'
     options.layerName = "budynki_EWGiB"
-    options.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteFile
+    options.actionOnExistingFile = QgsVectorFileWriter.ActionOnExistingFile.CreateOrOverwriteFile
     
     result = QgsVectorFileWriter.writeAsVectorFormatV3(
         memory_layer, 
@@ -1034,7 +1112,7 @@ def validate_and_fix_budynki_layer(layer, project_directory):
         options
     )
     
-    if result[0] == QgsVectorFileWriter.NoError:
+    if result[0] == QgsVectorFileWriter.WriterError.NoError:
         print(f"  ✅ Zapisano do: {output_path}")
         
         # Wczytaj zapisaną warstwę do projektu
@@ -1064,9 +1142,9 @@ def copy_and_save_base_layers_v2():
         return False, "Projekt musi być najpierw zapisany!"
     
     dialog = LayerSelectionDialog()
-    result = dialog.exec_()
+    result = dialog.exec()
     
-    if result != QDialog.Accepted:
+    if result != QDialog.DialogCode.Accepted:
         return False, "Anulowano wybór warstw"
     
     dzialki_layer, budynki_layer = dialog.get_selected_layers()
@@ -1177,12 +1255,12 @@ class LayerSelectionDialog(QDialog):
         layout.addWidget(self.info_label)
         
         button_box = QDialogButtonBox(
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         button_box.accepted.connect(self.validate_and_accept)
         button_box.rejected.connect(self.reject)
         
-        ok_button = button_box.button(QDialogButtonBox.Ok)
+        ok_button = button_box.button(QDialogButtonBox.StandardButton.Ok)
         ok_button.setText("✓ Zatwierdź wybór")
         ok_button.setMinimumHeight(40)
         ok_button.setStyleSheet("""
@@ -1198,7 +1276,7 @@ class LayerSelectionDialog(QDialog):
             }
         """)
         
-        cancel_button = button_box.button(QDialogButtonBox.Cancel)
+        cancel_button = button_box.button(QDialogButtonBox.StandardButton.Cancel)
         cancel_button.setText("✗ Anuluj")
         cancel_button.setMinimumHeight(40)
         
@@ -1213,8 +1291,8 @@ class LayerSelectionDialog(QDialog):
         polygon_layers = []
         
         for layer in QgsProject.instance().mapLayers().values():
-            if layer.type() == 0:
-                if layer.geometryType() == QgsWkbTypes.PolygonGeometry:
+            if isinstance(layer, QgsVectorLayer):  # warstwa wektorowa (dziala w QGIS 3 i 4)
+                if layer.geometryType() == QgsWkbTypes.GeometryType.PolygonGeometry:
                     polygon_layers.append(layer)
         
         if len(polygon_layers) == 0:
@@ -1271,9 +1349,9 @@ class LayerSelectionDialog(QDialog):
                 "Ta sama warstwa",
                 "Wybrałeś tę samą warstwę dla działek i budynków.\n\n"
                 "Czy na pewno chcesz kontynuować?",
-                QMessageBox.Yes | QMessageBox.No
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
-            if reply == QMessageBox.No:
+            if reply == QMessageBox.StandardButton.No:
                 return
         
         self.accept()
@@ -1295,9 +1373,9 @@ def copy_and_save_base_layers():
         return False, "Projekt musi być najpierw zapisany!"
     
     dialog = LayerSelectionDialog()
-    result = dialog.exec_()
+    result = dialog.exec()
     
-    if result != QDialog.Accepted:
+    if result != QDialog.DialogCode.Accepted:
         return False, "Anulowano wybór warstw"
     
     dzialki_layer, budynki_layer = dialog.get_selected_layers()
@@ -1347,6 +1425,22 @@ def copy_and_save_base_layers():
 
 # ==================== DIALOG DANYCH DZIAŁKI V2 ====================
 
+POLA_POG_DO_EKSPORTU = [
+    'pog_dostepny', 'pog_strefa_symbol', 'pog_strefa_oznaczenie',
+    'pog_strefa_nazwa', 'pog_strefa_nazwa_mian',
+    'pog_profil_podstawowy', 'pog_profil_dodatkowy',
+    'pog_maks_nadz_intens', 'pog_maks_nadz_intens_val',
+    'pog_maks_udzial_pow_zab', 'pog_maks_udzial_pow_zab_val',
+    'pog_maks_wysokosc', 'pog_maks_wysokosc_val',
+    'pog_min_pbc', 'pog_min_pbc_val',
+    'pog_ouz', 'pog_ouz_oznaczenie', 'pog_ozs', 'pog_ozs_oznaczenie',
+    'pog_uwagi',
+    'pog_zgodnosc_funkcji', 'podstawa_ustalen', 'wyb_par3', 'wyb_par7',
+    'sr_wys_dz_sasiednie', 'sr_wys_dz_sasiednie_lista',
+    'Lz_ustalona', 'Lz_sasiednie_lista', 'Lz_sasiednie_rowne',
+]
+
+
 class DaneDzialkiDialog(QDialog):
     """Dialog do wypełniania danych działki przedmiotowej - WERSJA 2"""
     
@@ -1364,6 +1458,9 @@ class DaneDzialkiDialog(QDialog):
         self.init_ui()
         
         self.load_wskazniki_from_layer()
+        
+        # Odczyt ustaleń planu ogólnego dla terenu inwestycji
+        self.odczytaj_plan_ogolny(auto=True)
         
         # Pierwsze przeliczenie wskaźników planowanych
         self.recalculate_planned_indicators()
@@ -1406,6 +1503,9 @@ class DaneDzialkiDialog(QDialog):
             index = self.obecne_zagospodarowanie_combo.findText(combo_value)
             if index >= 0:
                 self.obecne_zagospodarowanie_combo.setCurrentIndex(index)
+            # Stan terenu decyduje, czy jest co sumowac - przelicz po zmianie
+            self.obecne_zagospodarowanie_combo.currentTextChanged.connect(
+                self.recalculate_planned_indicators)
             
             self.rodzaj_istniejacy_edit = QLineEdit(self.data.get('rodzaj_istniejacy', ''))
             self.rodzaj_istniejacy_edit.setPlaceholderText("np. zabudowa jednorodzinna")
@@ -1419,7 +1519,6 @@ class DaneDzialkiDialog(QDialog):
             self.powierzchnia_dzialki_edit.textChanged.connect(self.recalculate_planned_indicators)
             self.powierzchnia_dzialki_edit.textChanged.connect(self.update_pbc_istniejaca)  # ⬅️ DODAJ TO
             self.powierzchnia_dzialki_edit.setPlaceholderText("np. 1234.56")
-            self.powierzchnia_dzialki_edit.textChanged.connect(self.recalculate_planned_indicators)
             
             # ⬅️ PLANOWANA PBC - MIN i MAX (przeniesione tutaj tymczasowo, potem do sekcji planowanej)
             self.powierzchnia_pbc_min_edit = QLineEdit(str(self.data.get('powierzchnia_biologicznie_czynna_min', '')))
@@ -1559,13 +1658,148 @@ class DaneDzialkiDialog(QDialog):
             dodatkowe_group.setLayout(dodatkowe_layout)
             scroll_layout.addWidget(dodatkowe_group)
             
+            # === SEKCJA 1c: Plan ogólny ===
+            pog_group = QGroupBox("🗺️ Plan ogólny gminy")
+            pog_layout = QVBoxLayout()
+            
+            self.pog_label = QLabel()
+            self.pog_label.setWordWrap(True)
+            self.pog_label.setTextFormat(Qt.TextFormat.RichText)
+            self.pog_label.setStyleSheet("""
+                QLabel {
+                    background-color: white;
+                    border: 1px solid #ccc;
+                    padding: 10px;
+                }
+            """)
+            pog_layout.addWidget(QLabel(
+                "<b>Ustalenia dla strefy planistycznej obejmującej teren inwestycji:</b>"
+            ))
+            pog_layout.addWidget(self.pog_label)
+            
+            pog_btn = ModernButton("🔄 Odczytaj strefę z planu ogólnego", "secondary")
+            pog_btn.clicked.connect(self.odczytaj_plan_ogolny)
+            pog_layout.addWidget(pog_btn)
+            
+            pog_form = QFormLayout()
+            pog_form.setSpacing(10)
+            
+            # --- zgodność funkcji z profilem strefy ---
+            self.pog_zgodnosc_combo = QComboBox()
+            self.pog_zgodnosc_combo.addItems(["mieści się", "nie mieści się"])
+            idx = self.pog_zgodnosc_combo.findText(
+                str(self.data.get('pog_zgodnosc_funkcji', 'mieści się'))
+            )
+            if idx >= 0:
+                self.pog_zgodnosc_combo.setCurrentIndex(idx)
+            pog_form.addRow(
+                "Planowana funkcja <b>…</b> w profilu strefy:", self.pog_zgodnosc_combo
+            )
+            
+            # --- podstawa ustaleń: § 2 ust. 2 albo ust. 3 ---
+            self.podstawa_ustalen_combo = QComboBox()
+            self.podstawa_ustalen_combo.addItems([
+                "§ 2 ust. 2 – zabudowa o takiej samej funkcji jak wnioskowana",
+                "§ 2 ust. 3 – wszystkie działki zabudowane w obszarze analizowanym",
+            ])
+            if "ust. 3" in str(self.data.get('podstawa_ustalen', '')):
+                self.podstawa_ustalen_combo.setCurrentIndex(1)
+            pog_form.addRow("<b>Podstawa ustaleń (§ 2):</b>", self.podstawa_ustalen_combo)
+            
+            podstawa_info = QLabel(
+                "<i style='color: #666; font-size: 10px;'>Ten wybór steruje brzmieniem "
+                "wszystkich zdań „w obszarze analizowanym na terenach o takiej samej "
+                "funkcji…” w całej analizie.</i>"
+            )
+            podstawa_info.setWordWrap(True)
+            pog_form.addRow(podstawa_info)
+            
+            # --- § 3 (linia zabudowy) ---
+            self.par3_combo = QComboBox()
+            self.par3_combo.addItems(["1", "2", "3"])
+            idx = self.par3_combo.findText(str(self.data.get('wyb_par3', '1')))
+            if idx >= 0:
+                self.par3_combo.setCurrentIndex(idx)
+            pog_form.addRow("Linia zabudowy – § 3 ust.:", self.par3_combo)
+
+            # Narzędzie: porównanie linii zabudowy z dwóch działek sąsiednich
+            lz_row = QHBoxLayout()
+            self.lz_ustalona_edit = QLineEdit(str(self.data.get('Lz_ustalona', '')))
+            self.lz_ustalona_edit.setPlaceholderText(
+                "zaznacz dwie linie na mapie i kliknij „Porównaj”"
+            )
+            lz_row.addWidget(self.lz_ustalona_edit, 1)
+            lz_btn_zazn = ModernButton("Zaznacz na mapie", "secondary")
+            lz_btn_zazn.setToolTip("Aktywuje warstwę 'linie_zabudowy' i narzędzie zaznaczania")
+            lz_btn_zazn.clicked.connect(self.zaznacz_linie_zabudowy)
+            lz_row.addWidget(lz_btn_zazn)
+            lz_btn_licz = ModernButton("Porównaj", "secondary")
+            lz_btn_licz.clicked.connect(self.porownaj_linie_zabudowy)
+            lz_row.addWidget(lz_btn_licz)
+            pog_form.addRow("Ustalona linia zabudowy:", lz_row)
+
+            self.lz_info_label = QLabel(
+                "<i style='color: #666; font-size: 10px;'>Zaznacz linie zabudowy budynków "
+                "na przylegających działkach sąsiednich dostępnych z tej samej drogi "
+                "publicznej. Równe odległości → § 3 ust. 1, różne → § 3 ust. 2; "
+                "jako ustaloną przyjmowana jest większa.</i>"
+            )
+            self.lz_info_label.setWordWrap(True)
+            pog_form.addRow(self.lz_info_label)
+            
+            # --- § 7 (wysokość zabudowy) ---
+            self.par7_combo = QComboBox()
+            # ust. 1  – wysokość ustalona jako średnia z działek sąsiednich
+            # ust. 2  – wysokość podwyższona względem średniej
+            # ust. 1-2 – oba ustępy powoływane łącznie
+            # ust. 3  – brak zabudowy odniesienia
+            self.par7_combo.addItems(["1", "2", "1-2", "3"])
+            idx = self.par7_combo.findText(str(self.data.get('wyb_par7', '1-2')))
+            if idx >= 0:
+                self.par7_combo.setCurrentIndex(idx)
+            pog_form.addRow("Wysokość zabudowy – § 7 ust.:", self.par7_combo)
+
+            # Narzędzie: średnia wysokość zabudowy na działkach sąsiednich.
+            # Liczona ZAWSZE, niezależnie od wybranego ustępu § 7 — jest
+            # podstawą ustalenia maksymalnej wysokości nowej zabudowy.
+            wys_row = QHBoxLayout()
+            self.sr_wys_sasiednie_edit = QLineEdit(
+                str(self.data.get('sr_wys_dz_sasiednie', ''))
+            )
+            self.sr_wys_sasiednie_edit.setPlaceholderText(
+                "zaznacz budynki na mapie i kliknij „Policz średnią”"
+            )
+            wys_row.addWidget(self.sr_wys_sasiednie_edit, 1)
+            wys_btn_zazn = ModernButton("Zaznacz na mapie", "secondary")
+            wys_btn_zazn.setToolTip("Aktywuje warstwę 'budynki_parametry' i narzędzie zaznaczania")
+            wys_btn_zazn.clicked.connect(self.zaznacz_budynki_sasiednie)
+            wys_row.addWidget(wys_btn_zazn)
+            wys_btn_licz = ModernButton("Policz średnią", "secondary")
+            wys_btn_licz.clicked.connect(self.policz_srednia_wysokosc_sasiadow)
+            wys_row.addWidget(wys_btn_licz)
+            pog_form.addRow("Śr. wysokość na działkach sąsiednich:", wys_row)
+
+            self.wys_info_label = QLabel(
+                "<i style='color: #666; font-size: 10px;'>Zaznacz budynki na przylegających "
+                "działkach sąsiednich dostępnych z tej samej drogi publicznej. Ta średnia "
+                "trafia do analizy jako maksymalna ustalona wysokość nowej zabudowy; "
+                "gdy jej nie policzysz, użyta zostanie średnia z całego obszaru "
+                "analizowanego.</i>"
+            )
+            self.wys_info_label.setWordWrap(True)
+            pog_form.addRow(self.wys_info_label)
+            
+            pog_layout.addLayout(pog_form)
+            pog_group.setLayout(pog_layout)
+            scroll_layout.addWidget(pog_group)
+            
             # === SEKCJA 2: Wskaźniki istniejącej zabudowy ===
             wskazniki_group = QGroupBox("📊 Wskaźniki ISTNIEJĄCEJ zabudowy")
             wskazniki_layout = QVBoxLayout()
             
             self.wskazniki_label = QLabel()
             self.wskazniki_label.setWordWrap(True)
-            self.wskazniki_label.setTextFormat(Qt.RichText)
+            self.wskazniki_label.setTextFormat(Qt.TextFormat.RichText)
             self.wskazniki_label.setStyleSheet("""
                 QLabel {
                     background-color: white;
@@ -1654,7 +1888,7 @@ class DaneDzialkiDialog(QDialog):
             
             self.wskazniki_plan_label = QLabel()
             self.wskazniki_plan_label.setWordWrap(True)
-            self.wskazniki_plan_label.setTextFormat(Qt.RichText)
+            self.wskazniki_plan_label.setTextFormat(Qt.TextFormat.RichText)
             self.wskazniki_plan_label.setStyleSheet("""
                 QLabel {
                     background-color: #e8f5e9;
@@ -1674,11 +1908,11 @@ class DaneDzialkiDialog(QDialog):
             main_layout.addWidget(scroll)
             
             # === PRZYCISKI DIALOGU ===
-            button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
             button_box.accepted.connect(self.save_and_accept)
             button_box.rejected.connect(self.reject)
             
-            ok_button = button_box.button(QDialogButtonBox.Ok)
+            ok_button = button_box.button(QDialogButtonBox.StandardButton.Ok)
             ok_button.setText("💾 Zapisz i kontynuuj")
             ok_button.setMinimumHeight(40)
             
@@ -1873,18 +2107,25 @@ class DaneDzialkiDialog(QDialog):
             
             for wskaznik_name in ['WPZ', 'WPBC']:
                 value = wskazniki.get(wskaznik_name, 0)
+                # WPZ/WPBC bywaja juz gotowym tekstem z "%" (pole QVariant.String),
+                # a czasem liczba. Format .0f dziala tylko na liczbie -> rzutuj bezpiecznie.
+                value_str = value if isinstance(value, str) else f"{float(value):.0f}%"
                 html += f"""
                     <tr>
                         <td style='border: 1px solid #ccc; padding: 8px; font-weight: bold;'>{wskaznik_name}</td>
-                        <td style='border: 1px solid #ccc; padding: 8px; text-align: right;'>{value:.0f}%</td>
+                        <td style='border: 1px solid #ccc; padding: 8px; text-align: right;'>{value_str}</td>
                     </tr>
                 """
             for wskaznik_name in ['WIZ', 'WNIZ',]:
                 value = wskazniki.get(wskaznik_name, 0)
+                try:
+                    value_str = f"{float(value):.2f}"
+                except (ValueError, TypeError):
+                    value_str = str(value)
                 html += f"""
                     <tr>
                         <td style='border: 1px solid #ccc; padding: 8px; font-weight: bold;'>{wskaznik_name}</td>
-                        <td style='border: 1px solid #ccc; padding: 8px; text-align: right;'>{value:.2f}</td>
+                        <td style='border: 1px solid #ccc; padding: 8px; text-align: right;'>{value_str}</td>
                     </tr>
                 """
             
@@ -1921,6 +2162,181 @@ class DaneDzialkiDialog(QDialog):
             self.pbc_istniejaca_label.setText("0.00")
         
         
+    # ══════════════════════════════════════════════════════════════════
+    # NARZĘDZIA LICZĄCE Z ZAZNACZENIA NA MAPIE
+    # ══════════════════════════════════════════════════════════════════
+
+    def _aktywuj_zaznaczanie(self, nazwa_warstwy):
+        """Wspólna obsługa przycisków „Zaznacz na mapie”."""
+        try:
+            nw = _narzedzia_wyboru()
+        except Exception as e:
+            QMessageBox.critical(self, "Brak modułu",
+                                 f"Nie znaleziono narzedzia_wyboru.py:\n{e}")
+            return
+        ok, komunikat = nw.aktywuj_zaznaczanie(nazwa_warstwy)
+        if ok:
+            print(f"🖱️ {komunikat}")
+        else:
+            QMessageBox.warning(self, "Zaznaczanie", komunikat)
+
+    def zaznacz_budynki_sasiednie(self):
+        try:
+            nw = _narzedzia_wyboru()
+            self._aktywuj_zaznaczanie(nw.WARSTWA_BUDYNKI)
+        except Exception as e:
+            QMessageBox.critical(self, "Błąd", str(e))
+
+    def zaznacz_linie_zabudowy(self):
+        try:
+            nw = _narzedzia_wyboru()
+            self._aktywuj_zaznaczanie(nw.WARSTWA_LINIE)
+        except Exception as e:
+            QMessageBox.critical(self, "Błąd", str(e))
+
+    def policz_srednia_wysokosc_sasiadow(self):
+        """Średnia wysokość zaznaczonych budynków na działkach sąsiednich."""
+        try:
+            nw = _narzedzia_wyboru()
+        except Exception as e:
+            QMessageBox.critical(self, "Brak modułu",
+                                 f"Nie znaleziono narzedzia_wyboru.py:\n{e}")
+            return
+
+        ok, dane, komunikat = nw.srednia_wysokosc_sasiadow()
+        if not ok:
+            QMessageBox.warning(self, "Średnia wysokość", komunikat)
+            return
+
+        self.sr_wys_sasiednie_edit.setText(nw.formatuj_metry(dane["srednia"]))
+        self.data['sr_wys_dz_sasiednie_lista'] = "; ".join(
+            nw.formatuj_metry(w) for w in dane["wartosci"]
+        )
+        self.wys_info_label.setText(
+            f"<span style='color: #2E7D32; font-size: 10px;'>✅ {komunikat}</span>"
+        )
+        print(f"📏 {komunikat}")
+
+    def porownaj_linie_zabudowy(self):
+        """Porównanie linii zabudowy z dwóch działek sąsiednich (§ 3 ust. 1 / 2)."""
+        try:
+            nw = _narzedzia_wyboru()
+        except Exception as e:
+            QMessageBox.critical(self, "Brak modułu",
+                                 f"Nie znaleziono narzedzia_wyboru.py:\n{e}")
+            return
+
+        ok, dane, komunikat = nw.linia_zabudowy_z_zaznaczenia()
+        if not ok:
+            QMessageBox.warning(self, "Linia zabudowy", komunikat)
+            return
+
+        self.lz_ustalona_edit.setText(nw.formatuj_metry(dane["ustalona"]))
+        idx = self.par3_combo.findText(dane["ustep"])
+        if idx >= 0:
+            self.par3_combo.setCurrentIndex(idx)
+        self.data['Lz_sasiednie_lista'] = "; ".join(
+            nw.formatuj_metry(d) for d in dane["odleglosci"]
+        )
+        self.data['Lz_sasiednie_rowne'] = "tak" if dane["rowne"] else "nie"
+
+        kolor = "#2E7D32" if dane["rowne"] else "#EF6C00"
+        self.lz_info_label.setText(
+            f"<span style='color: {kolor}; font-size: 10px;'>✅ {komunikat}</span>"
+        )
+        print(f"📐 {komunikat}")
+
+    def odczytaj_plan_ogolny(self, auto=False):
+        """
+        Odczytuje ustalenia planu ogólnego dla terenu inwestycji.
+
+        auto=True (wywołanie przy otwarciu okna) — jeśli dane zostały już
+        wcześniej zapisane w pliku, tylko je wyświetla, bez ponownego
+        przecinania warstw.
+        """
+        if auto and str(self.data.get('pog_dostepny', '')) == 'tak':
+            self.pog_label.setText(self._pog_html(self.data, zrodlo="z pliku"))
+            return
+
+        try:
+            pog = _plan_ogolny()
+        except Exception as e:
+            self.pog_label.setText(
+                f"<span style='color: red;'>❌ Brak modułu plan_ogolny.py ({e})</span>"
+            )
+            return
+
+        try:
+            dane = pog.zbierz_dane_pog()
+        except Exception as e:
+            print(f"⚠️ Błąd odczytu planu ogólnego: {e}")
+            import traceback
+            traceback.print_exc()
+            self.pog_label.setText(
+                f"<span style='color: red;'>❌ Błąd odczytu planu ogólnego: {e}</span>"
+            )
+            return
+
+        self.data.update(dane)
+        self.pog_label.setText(self._pog_html(dane, zrodlo="z warstw projektu"))
+
+        if dane.get('pog_dostepny') != 'tak':
+            print("⚠️ Plan ogólny: " + str(dane.get('pog_uwagi', '')))
+
+    @staticmethod
+    def _pog_html(dane, zrodlo=""):
+        """Tabelka z ustaleniami strefy planistycznej."""
+        if str(dane.get('pog_dostepny', 'nie')) != 'tak':
+            uwagi = dane.get('pog_uwagi', '') or "nie znaleziono warstw planu ogólnego"
+            return (
+                "<p style='color: #FF9800; font-weight: bold;'>⚠️ Nie odczytano strefy "
+                "planistycznej</p>"
+                f"<p style='color: #666;'>{uwagi}</p>"
+                "<p style='color: #666; font-size: 11px;'>Wczytaj definicję warstw planu "
+                "ogólnego (POG.qlr) i upewnij się, że istnieje warstwa "
+                "<i>granica_terenu</i>.</p>"
+            )
+
+        wiersze = [
+            ("Strefa planistyczna",
+             f"{dane.get('pog_strefa_oznaczenie', '')} – "
+             f"{dane.get('pog_strefa_nazwa_mian', dane.get('pog_strefa_nazwa', ''))}"),
+            ("Profil podstawowy", dane.get('pog_profil_podstawowy', '')),
+            ("Profil dodatkowy", dane.get('pog_profil_dodatkowy', '')),
+            ("Maks. nadziemna intensywność", dane.get('pog_maks_nadz_intens', '')),
+            ("Maks. udział pow. zabudowy", dane.get('pog_maks_udzial_pow_zab', '')),
+            ("Maks. wysokość zabudowy", dane.get('pog_maks_wysokosc', '')),
+            ("Min. udział pow. biol. czynnej", dane.get('pog_min_pbc', '')),
+            ("Obszar uzupełnienia zabudowy",
+             ("TAK – " + str(dane.get('pog_ouz_oznaczenie', '')))
+             if str(dane.get('pog_ouz', 'nie')) == 'tak' else "nie"),
+            ("Obszar zabudowy śródmiejskiej",
+             "TAK" if str(dane.get('pog_ozs', 'nie')) == 'tak' else "nie"),
+        ]
+
+        html = (
+            f"<p style='color: #4CAF50; font-weight: bold;'>✅ Ustalenia odczytane "
+            f"{zrodlo}</p>"
+            "<table style='border-collapse: collapse; width: 100%;'>"
+        )
+        for etykieta, wartosc in wiersze:
+            html += (
+                "<tr>"
+                "<td style='border: 1px solid #ccc; padding: 6px; font-weight: bold; "
+                f"width: 45%;'>{etykieta}</td>"
+                f"<td style='border: 1px solid #ccc; padding: 6px;'>{wartosc}</td>"
+                "</tr>"
+            )
+        html += "</table>"
+
+        uwagi = dane.get('pog_uwagi', '')
+        if uwagi:
+            html += (
+                f"<p style='color: #FF9800; font-size: 11px; margin-top: 8px;'>"
+                f"⚠️ {uwagi}</p>"
+            )
+        return html
+
     def add_building_params(self, existing_params=None):
             """Dodaj formularz parametrów budynku - Z MIN/MAX i AUTO-OBLICZANIEM"""
             building_num = self.buildings_layout.count() + 1
@@ -2044,7 +2460,7 @@ class DaneDzialkiDialog(QDialog):
             
             # ⬅️ DACH - WIELOKROTNY WYBÓR (QListWidget z checkboxami)
             dach_list = QListWidget()
-            dach_list.setSelectionMode(QListWidget.MultiSelection)
+            dach_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
             dach_list.setMaximumHeight(100)
             dach_typy = [
                 "płaski",
@@ -2097,6 +2513,11 @@ class DaneDzialkiDialog(QDialog):
                 remove_btn.clicked.connect(lambda: self.remove_building_params(group))
                 layout.addRow("", remove_btn)
             
+            # Odtworz stan "auto / recznie" dla sum powierzchni kondygnacji,
+            # inaczej po wczytaniu z pliku liczba kondygnacji nic by nie zmieniala.
+            if existing_params:
+                self.oznacz_kondygnacje_z_pliku(fields)
+
             group.setLayout(layout)
             group.fields = fields
             group.suffix = suffix
@@ -2104,63 +2525,84 @@ class DaneDzialkiDialog(QDialog):
             self.buildings_layout.addWidget(group)            
             
             
+    # Pola sum powierzchni kondygnacji i sposob ich wyliczania z liczby kondygnacji
+    POLA_KONDYGNACJI = (
+        ('powierzchnia_kond_podziemnych_min', 'powierzchnia_zabudowy_min', 'liczba_kond_podziemnych_min'),
+        ('powierzchnia_kond_podziemnych_max', 'powierzchnia_zabudowy_max', 'liczba_kond_podziemnych_max'),
+        ('powierzchnia_kond_nadziemnych_min', 'powierzchnia_zabudowy_min', 'liczba_kond_nadziemnych_min'),
+        ('powierzchnia_kond_nadziemnych_max', 'powierzchnia_zabudowy_max', 'liczba_kond_nadziemnych_max'),
+    )
+
+    @staticmethod
+    def _pole_jest_auto(pole):
+        """
+        Czy pole trzyma wartość wpisaną przez automat (a nie ręczną korektę)?
+
+        Puste pole traktujemy jak automatyczne. Poza tym porównujemy treść
+        z ostatnią wartością, którą automat sam wpisał — dzięki temu ręczna
+        zmiana nie jest już nadpisywana przy kolejnym przeliczeniu.
+        """
+        tekst = pole.text().strip()
+        if not tekst:
+            return True
+        zapamietana = pole.property('auto_value')
+        return zapamietana is not None and tekst == str(zapamietana)
+
+    @classmethod
+    def _ustaw_auto(cls, pole, wartosc):
+        """Wpisuje wartość automatu i zapamiętuje ją do późniejszego porównania."""
+        tekst = str(wartosc)
+        pole.setText(tekst)
+        pole.setProperty('auto_value', tekst)
+
+    @classmethod
+    def oznacz_kondygnacje_z_pliku(cls, fields):
+        """
+        Odtwarza stan "auto / ręcznie" po wczytaniu danych z pliku.
+
+        Bez tego wszystkie wczytane sumy wyglądały na ręczne i liczba
+        kondygnacji przestawała cokolwiek zmieniać.
+        """
+        for pole_sumy, pole_pow, pole_liczby in cls.POLA_KONDYGNACJI:
+            try:
+                pow_zab = float(fields[pole_pow].text() or 0)
+                liczba = int(float(fields[pole_liczby].text() or 0))
+            except (ValueError, TypeError):
+                continue
+            oczekiwana = round(pow_zab * liczba, 2)
+            biezaca = fields[pole_sumy].text().strip()
+            if not biezaca:
+                continue
+            try:
+                if abs(float(biezaca.replace(',', '.')) - oczekiwana) < 0.01:
+                    fields[pole_sumy].setProperty('auto_value', biezaca)
+            except (ValueError, TypeError):
+                continue
+
     def auto_calculate_kondygnacje(self, fields):
-        """Auto-oblicz sumy powierzchni kondygnacji na podstawie liczby kondygnacji"""
+        """
+        Przelicza sumy powierzchni kondygnacji z powierzchni zabudowy
+        i liczby kondygnacji. Pola zmienione ręcznie zostawia w spokoju.
+        """
         try:
-            # Pobierz wartości
-            pow_zab_min = float(fields['powierzchnia_zabudowy_min'].text() or 0)
-            pow_zab_max = float(fields['powierzchnia_zabudowy_max'].text() or 0)
-            
-            liczba_podz_min = int(fields['liczba_kond_podziemnych_min'].text() or 0)
-            liczba_podz_max = int(fields['liczba_kond_podziemnych_max'].text() or 0)
-            liczba_nadz_min = int(fields['liczba_kond_nadziemnych_min'].text() or 0)
-            liczba_nadz_max = int(fields['liczba_kond_nadziemnych_max'].text() or 0)
-            
-            # Oblicz sumy (min * min, max * max)
-            suma_podz_min = pow_zab_min * liczba_podz_min
-            suma_podz_max = pow_zab_max * liczba_podz_max
-            suma_nadz_min = pow_zab_min * liczba_nadz_min
-            suma_nadz_max = pow_zab_max * liczba_nadz_max
-            
-            # Ustaw wartości (tylko jeśli pole jest puste lub ma auto-wartość)
-            # Blokuj sygnały żeby uniknąć pętli
-            fields['powierzchnia_kond_podziemnych_min'].blockSignals(True)
-            fields['powierzchnia_kond_podziemnych_max'].blockSignals(True)
-            fields['powierzchnia_kond_nadziemnych_min'].blockSignals(True)
-            fields['powierzchnia_kond_nadziemnych_max'].blockSignals(True)
-            
-            # Ustaw tylko jeśli użytkownik nie wpisał ręcznie
-            if not fields['powierzchnia_kond_podziemnych_min'].text() or \
-               fields['powierzchnia_kond_podziemnych_min'].property('auto_filled'):
-                fields['powierzchnia_kond_podziemnych_min'].setText(str(round(suma_podz_min, 2)))
-                fields['powierzchnia_kond_podziemnych_min'].setProperty('auto_filled', True)
-            
-            if not fields['powierzchnia_kond_podziemnych_max'].text() or \
-               fields['powierzchnia_kond_podziemnych_max'].property('auto_filled'):
-                fields['powierzchnia_kond_podziemnych_max'].setText(str(round(suma_podz_max, 2)))
-                fields['powierzchnia_kond_podziemnych_max'].setProperty('auto_filled', True)
-            
-            if not fields['powierzchnia_kond_nadziemnych_min'].text() or \
-               fields['powierzchnia_kond_nadziemnych_min'].property('auto_filled'):
-                fields['powierzchnia_kond_nadziemnych_min'].setText(str(round(suma_nadz_min, 2)))
-                fields['powierzchnia_kond_nadziemnych_min'].setProperty('auto_filled', True)
-            
-            if not fields['powierzchnia_kond_nadziemnych_max'].text() or \
-               fields['powierzchnia_kond_nadziemnych_max'].property('auto_filled'):
-                fields['powierzchnia_kond_nadziemnych_max'].setText(str(round(suma_nadz_max, 2)))
-                fields['powierzchnia_kond_nadziemnych_max'].setProperty('auto_filled', True)
-            
-            fields['powierzchnia_kond_podziemnych_min'].blockSignals(False)
-            fields['powierzchnia_kond_podziemnych_max'].blockSignals(False)
-            fields['powierzchnia_kond_nadziemnych_min'].blockSignals(False)
-            fields['powierzchnia_kond_nadziemnych_max'].blockSignals(False)
-            
-            # Przelicz wskaźniki
-            self.recalculate_planned_indicators()
-            
+            wartosci = {}
+            for pole_sumy, pole_pow, pole_liczby in self.POLA_KONDYGNACJI:
+                pow_zab = float(fields[pole_pow].text() or 0)
+                liczba = int(float(fields[pole_liczby].text() or 0))
+                wartosci[pole_sumy] = round(pow_zab * liczba, 2)
         except (ValueError, TypeError):
-            pass  # Ignoruj błędy konwersji
-            
+            return  # niepełne dane w formularzu - nic nie ruszamy
+
+        for pole_sumy, _, _ in self.POLA_KONDYGNACJI:
+            pole = fields[pole_sumy]
+            if not self._pole_jest_auto(pole):
+                continue  # użytkownik wpisał swoją wartość
+            pole.blockSignals(True)
+            self._ustaw_auto(pole, wartosci[pole_sumy])
+            pole.blockSignals(False)
+
+        self.recalculate_planned_indicators()
+
     def on_obsluga_kom_changed(self, text):
         """Pokaż/ukryj pole działki dojazdu w zależności od typu obsługi"""
         if text == "bezpośrednia":
@@ -2185,10 +2627,10 @@ class DaneDzialkiDialog(QDialog):
             self,
             "Potwierdzenie",
             "Czy na pewno usunąć ten typ budynku?",
-            QMessageBox.Yes | QMessageBox.No
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         
-        if reply == QMessageBox.Yes:
+        if reply == QMessageBox.StandardButton.Yes:
             self.buildings_layout.removeWidget(group_widget)
             group_widget.deleteLater()
             
@@ -2268,7 +2710,11 @@ class DaneDzialkiDialog(QDialog):
                 
                 # ===== POBIERZ TRYB PLANOWANEJ ZABUDOWY =====
                 tryb_zabudowy = self.tryb_zabudowy_combo.currentText()
-                uzupelnia = "uzupełnia" in tryb_zabudowy
+                # Na terenie niezabudowanym nie ma czego sumowac - tryb
+                # "uzupelnia" nie moze doliczac nieistniejacej zabudowy,
+                # nawet jesli warstwa niesie niezerowe wskazniki (np. sprzed
+                # wyburzenia).
+                uzupelnia = ("uzupełnia" in tryb_zabudowy) and teren_zabudowany
                 
                 # ===== OBLICZ WSKAŹNIKI PLANOWANE - MIN i MAX =====
                 wpz_plan_min = (suma_pow_zabudowy_min / pow_dzialki * 100)
@@ -2305,7 +2751,13 @@ class DaneDzialkiDialog(QDialog):
                 self.data['w_wpbc_planowane_max'] = wpbc_plan_max
                 
                 # ⬅️ WYŚWIETL TABELĘ Z 4 KOLUMNAMI
-                tryb_info = "SUMA z istniejącą" if uzupelnia else "ZASTĘPUJE istniejącą"
+                if not teren_zabudowany:
+                    tryb_info = ("teren NIEZABUDOWANY - wskaźniki wyłącznie z planowanej "
+                                 "zabudowy (tryb nie ma zastosowania)")
+                elif uzupelnia:
+                    tryb_info = "SUMA z istniejącą"
+                else:
+                    tryb_info = "ZASTĘPUJE istniejącą"
             
                 html = f"""
                 <p style='color: #1976D2; font-weight: bold; margin-bottom: 10px;'>
@@ -2355,7 +2807,10 @@ class DaneDzialkiDialog(QDialog):
                 - Pow. kond. podziemne (plan.): {suma_pow_kond_podziemne_min:.2f} - {suma_pow_kond_podziemne_max:.2f} m²<br>
                 - Pow. kond. nadziemne (plan.): {suma_pow_kond_nadziemne_min:.2f} - {suma_pow_kond_nadziemne_max:.2f} m²<br>
                 - Pow. biol. czynna (plan.): {pow_pbc_min:.2f} - {pow_pbc_max:.2f} m²<br>
-                - Teren: {'zabudowany' if teren_zabudowany else 'niezabudowany'}
+                - Teren: {'zabudowany' if teren_zabudowany else 'niezabudowany'}<br>
+                <br>
+                <i>WPBC nie jest sumowany ani pomniejszany w żadnym trybie - wchodzi
+                dokładnie taki, jaki podał inwestor.</i>
                 </p>
                 """
                 
@@ -2392,6 +2847,7 @@ class DaneDzialkiDialog(QDialog):
             return
         
         try:
+            _ensure_pandas()
             df_export = pd.read_excel(file_path, sheet_name='do_eksportu')
             
             for _, row in df_export.iterrows():
@@ -2432,6 +2888,7 @@ class DaneDzialkiDialog(QDialog):
             
             # ⬅️ KONWERTUJ WSZYSTKIE WARTOŚCI NA ODPOWIEDNIE TYPY
             for key, value in self.data.items():
+                _ensure_pandas()
                 if pd.isna(value):
                     self.data[key] = ''
                 elif isinstance(value, float) and key not in ['WPZ', 'WIZ', 'WNIZ', 'WPBC', 
@@ -2474,6 +2931,17 @@ class DaneDzialkiDialog(QDialog):
             self.data['obsluga_komunikacyjna'] = self.obsluga_kom_combo.currentText()
             self.data['dzialka_dojazd'] = self.dzialka_dojazd_edit.text()
             self.data['tryb_planowanej_zabudowy'] = self.tryb_zabudowy_combo.currentText()
+            
+            # ⬅️ PLAN OGÓLNY – wybory sterujące wariantami w szablonie
+            self.data['pog_zgodnosc_funkcji'] = self.pog_zgodnosc_combo.currentText()
+            self.data['podstawa_ustalen'] = (
+                "§ 2 ust. 3" if self.podstawa_ustalen_combo.currentIndex() == 1
+                else "§ 2 ust. 2"
+            )
+            self.data['wyb_par3'] = self.par3_combo.currentText()
+            self.data['wyb_par7'] = self.par7_combo.currentText()
+            self.data['sr_wys_dz_sasiednie'] = self.sr_wys_sasiednie_edit.text().strip()
+            self.data['Lz_ustalona'] = self.lz_ustalona_edit.text().strip()
             
             # ⬅️ LINIA ZABUDOWY
             lz_w = self.lz_w_edit.text().strip()
@@ -2623,6 +3091,26 @@ class DaneDzialkiDialog(QDialog):
                 dane_arkusz.append(['tryb planowanej zabudowy', self.data.get('tryb_planowanej_zabudowy', ''), '', '', '', '', ''])    
                 dane_arkusz.append(['', '', '', '', '', '', ''])
                 
+                # ⬅️ USTALENIA PLANU OGÓLNEGO
+                dane_arkusz.append(['Plan ogólny - strefa planistyczna', '', '', '', '', '', ''])
+                dane_arkusz.append(['strefa', self.data.get('pog_strefa_oznaczenie', ''),
+                                   self.data.get('pog_strefa_nazwa_mian', ''), '', '', '', ''])
+                dane_arkusz.append(['profil podstawowy', self.data.get('pog_profil_podstawowy', ''), '', '', '', '', ''])
+                dane_arkusz.append(['profil dodatkowy', self.data.get('pog_profil_dodatkowy', ''), '', '', '', '', ''])
+                dane_arkusz.append(['maks. nadziemna intensywność zabudowy', self.data.get('pog_maks_nadz_intens', ''), '', '', '', '', ''])
+                dane_arkusz.append(['maks. udział powierzchni zabudowy', self.data.get('pog_maks_udzial_pow_zab', ''), '', '', '', '', ''])
+                dane_arkusz.append(['maks. wysokość zabudowy', self.data.get('pog_maks_wysokosc', ''), '', '', '', '', ''])
+                dane_arkusz.append(['min. udział pow. biologicznie czynnej', self.data.get('pog_min_pbc', ''), '', '', '', '', ''])
+                dane_arkusz.append(['obszar uzupełnienia zabudowy', self.data.get('pog_ouz', ''),
+                                   self.data.get('pog_ouz_oznaczenie', ''), '', '', '', ''])
+                dane_arkusz.append(['obszar zabudowy śródmiejskiej', self.data.get('pog_ozs', ''), '', '', '', '', ''])
+                dane_arkusz.append(['podstawa ustaleń (rozporządzenie)', self.data.get('podstawa_ustalen', ''), '', '', '', '', ''])
+                dane_arkusz.append(['śr. wysokość na działkach sąsiednich', self.data.get('sr_wys_dz_sasiednie', ''),
+                                   self.data.get('sr_wys_dz_sasiednie_lista', ''), '', '', '', ''])
+                dane_arkusz.append(['ustalona linia zabudowy', self.data.get('Lz_ustalona', ''),
+                                   self.data.get('Lz_sasiednie_lista', ''), '', '', '', ''])
+                dane_arkusz.append(['', '', '', '', '', '', ''])
+                
                 # ⬅️ NOWA STRUKTURA - ISTNIEJĄCE vs PLANOWANE MIN/MAX
                 dane_arkusz.append(['Wskaźniki zabudowy', 'Istniejące', 'Planowane MIN', 'Planowane MAX', '', '', ''])
                 dane_arkusz.append(['WPZ [%]', 
@@ -2674,6 +3162,7 @@ class DaneDzialkiDialog(QDialog):
                                        building['liczba_kond_nadziemnych_max'], '', '', '', ''])
                     dane_arkusz.append(['', '', '', '', '', '', ''])
                 
+                _ensure_pandas()
                 df_dane = pd.DataFrame(dane_arkusz)
                 
                 # === ARKUSZ 2: do_eksportu ===
@@ -2731,6 +3220,10 @@ class DaneDzialkiDialog(QDialog):
                 
                 eksport_data.append(['tryb_planowanej_zabudowy', self.data.get('tryb_planowanej_zabudowy', '')])
                 
+                # ⬅️ PLAN OGÓLNY
+                for _pole_pog in POLA_POG_DO_EKSPORTU:
+                    eksport_data.append([_pole_pog, self.data.get(_pole_pog, '')])
+                
                 for building in building_data:
                     suffix = building['suffix']
                     
@@ -2755,8 +3248,10 @@ class DaneDzialkiDialog(QDialog):
                     eksport_data.append([f'liczba_kond_nadziemnych_min_{suffix}', building['liczba_kond_nadziemnych_min']])
                     eksport_data.append([f'liczba_kond_nadziemnych_max_{suffix}', building['liczba_kond_nadziemnych_max']])
                     
+                _ensure_pandas()
                 df_eksport = pd.DataFrame(eksport_data, columns=['nazwa_pola', 'wartosc'])
                 
+                _ensure_pandas()
                 with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
                     df_dane.to_excel(writer, sheet_name='dane_dzialki', index=False, header=False)
                     df_eksport.to_excel(writer, sheet_name='do_eksportu', index=False)
@@ -2787,11 +3282,11 @@ class SelectFeatureDockWidget(QDockWidget):
         self.selected_feature_id = None
         
         # Ustaw właściwości dock widget
-        self.setAllowedAreas(Qt.RightDockWidgetArea | Qt.LeftDockWidgetArea)
+        self.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.LeftDockWidgetArea)
         self.setFeatures(
-            QDockWidget.DockWidgetClosable | 
-            QDockWidget.DockWidgetMovable |
-            QDockWidget.DockWidgetFloatable
+            QDockWidget.DockWidgetFeature.DockWidgetClosable | 
+            QDockWidget.DockWidgetFeature.DockWidgetMovable |
+            QDockWidget.DockWidgetFeature.DockWidgetFloatable
         )
         
         self.init_ui()
@@ -2848,7 +3343,7 @@ class SelectFeatureDockWidget(QDockWidget):
         
         # Status - automatycznie aktualizowany
         status_frame = QFrame()
-        status_frame.setFrameShape(QFrame.StyledPanel)
+        status_frame.setFrameShape(QFrame.Shape.StyledPanel)
         status_layout = QVBoxLayout()
         
         self.status_label = QLabel("⏸️ Oczekiwanie na wybór warstwy...")
@@ -2889,8 +3384,8 @@ class SelectFeatureDockWidget(QDockWidget):
         polygon_layers = []
         
         for layer in QgsProject.instance().mapLayers().values():
-            if layer.type() == 0:  # Vector layer
-                if layer.geometryType() == QgsWkbTypes.PolygonGeometry:
+            if isinstance(layer, QgsVectorLayer):  # warstwa wektorowa (dziala w QGIS 3 i 4)
+                if layer.geometryType() == QgsWkbTypes.GeometryType.PolygonGeometry:
                     polygon_layers.append(layer)
         
         if not polygon_layers:
@@ -2924,10 +3419,12 @@ class SelectFeatureDockWidget(QDockWidget):
                 if not sip.isdeleted(self.selected_layer):
                     try:
                         self.selected_layer.selectionChanged.disconnect(self.update_selection_status)
-                    except:
-                        pass
+                    except Exception:
+                        # celowo ignorowane: operacja best-effort (np. odlaczenie sygnalu, ktory moze nie byc podlaczony)
+                        pass  # nosec B110
         except (RuntimeError, AttributeError):
-            pass
+            # celowo ignorowane: operacja best-effort (np. odlaczenie sygnalu, ktory moze nie byc podlaczony)
+            pass  # nosec B110
         
         layer = self.layer_combo.currentData()
         if not layer:
@@ -3036,10 +3533,12 @@ class SelectFeatureDockWidget(QDockWidget):
                 if not sip.isdeleted(self.selected_layer):
                     try:
                         self.selected_layer.selectionChanged.disconnect(self.update_selection_status)
-                    except:
-                        pass
+                    except Exception:
+                        # celowo ignorowane: operacja best-effort (np. odlaczenie sygnalu, ktory moze nie byc podlaczony)
+                        pass  # nosec B110
         except (RuntimeError, AttributeError):
-            pass
+            # celowo ignorowane: operacja best-effort (np. odlaczenie sygnalu, ktory moze nie byc podlaczony)
+            pass  # nosec B110
         
         # Wywołaj callback
         if self.callback_function:
@@ -3056,10 +3555,12 @@ class SelectFeatureDockWidget(QDockWidget):
                 if not sip.isdeleted(self.selected_layer):
                     try:
                         self.selected_layer.selectionChanged.disconnect(self.update_selection_status)
-                    except:
-                        pass
+                    except Exception:
+                        # celowo ignorowane: operacja best-effort (np. odlaczenie sygnalu, ktory moze nie byc podlaczony)
+                        pass  # nosec B110
         except (RuntimeError, AttributeError):
-            pass
+            # celowo ignorowane: operacja best-effort (np. odlaczenie sygnalu, ktory moze nie byc podlaczony)
+            pass  # nosec B110
         
         # Wywołaj callback z None
         if self.callback_function:
@@ -3076,8 +3577,9 @@ class SelectFeatureDockWidget(QDockWidget):
                 if not sip.isdeleted(self.selected_layer):
                     try:
                         self.selected_layer.selectionChanged.disconnect(self.update_selection_status)
-                    except:
-                        pass
+                    except Exception:
+                        # celowo ignorowane: operacja best-effort (np. odlaczenie sygnalu, ktory moze nie byc podlaczony)
+                        pass  # nosec B110
         except (RuntimeError, AttributeError):
             # Obiekt został już usunięty przez QGIS
             pass
@@ -3156,8 +3658,8 @@ def validate_and_create_uldk_layer(source_layer, feature_id, project_directory):
             layer_type="terenu przedmiotowego"
         )
         
-        result = dialog.exec_()
-        if result != QDialog.Accepted:
+        result = dialog.exec()
+        if result != QDialog.DialogCode.Accepted:
             return False, "Anulowano mapowanie pól"
         
         field_mapping = dialog.get_field_mapping()
@@ -3230,7 +3732,7 @@ def validate_and_create_uldk_layer(source_layer, feature_id, project_directory):
     options.driverName = 'GPKG'
     options.fileEncoding = 'UTF-8'
     options.layerName = "Wyniki wyszukiwania ULDK"
-    options.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteFile
+    options.actionOnExistingFile = QgsVectorFileWriter.ActionOnExistingFile.CreateOrOverwriteFile
     
     result = QgsVectorFileWriter.writeAsVectorFormatV3(
         memory_layer, 
@@ -3239,7 +3741,7 @@ def validate_and_create_uldk_layer(source_layer, feature_id, project_directory):
         options
     )
     
-    if result[0] == QgsVectorFileWriter.NoError:
+    if result[0] == QgsVectorFileWriter.WriterError.NoError:
         print(f"  ✅ Zapisano do: {output_path}")
         
         # Wczytaj zapisaną warstwę do projektu
@@ -3282,10 +3784,10 @@ def handle_granica_terenu_step():
             "Czy chcesz:\n"
             "• TAK - użyć istniejącej warstwy\n"
             "• NIE - utworzyć nową (nadpisze istniejącą)",
-            QMessageBox.Yes | QMessageBox.No
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         
-        if reply == QMessageBox.Yes:
+        if reply == QMessageBox.StandardButton.Yes:
             return True, "Używam istniejącej warstwy ULDK", False, False
     
     # Pokaż dialog wyboru metody
@@ -3296,13 +3798,13 @@ def handle_granica_terenu_step():
         "🔌 GIS Support - użyj wtyczki do wyszukania działki w ULDK\n"
         "📍 Wskaż ręcznie - wybierz obiekt z istniejącej warstwy"
     )
-    msg_box.setIcon(QMessageBox.Question)
+    msg_box.setIcon(QMessageBox.Icon.Question)
     
-    gis_support_btn = msg_box.addButton("🔌 GIS Support", QMessageBox.YesRole)
-    manual_btn = msg_box.addButton("📍 Wskaż ręcznie", QMessageBox.NoRole)
-    cancel_btn = msg_box.addButton("Anuluj", QMessageBox.RejectRole)
+    gis_support_btn = msg_box.addButton("🔌 GIS Support", QMessageBox.ButtonRole.YesRole)
+    manual_btn = msg_box.addButton("📍 Wskaż ręcznie", QMessageBox.ButtonRole.NoRole)
+    cancel_btn = msg_box.addButton("Anuluj", QMessageBox.ButtonRole.RejectRole)
     
-    msg_box.exec_()
+    msg_box.exec()
     clicked_button = msg_box.clickedButton()
     
     if clicked_button == cancel_btn:
@@ -3449,7 +3951,7 @@ class WZWorkflowDockWidget(QDockWidget):
         scroll_area = QScrollArea()
         scroll_area.setWidget(main_widget)
         scroll_area.setWidgetResizable(True)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         
         main_layout = QVBoxLayout()
         main_layout.setSpacing(15)
@@ -3474,7 +3976,7 @@ class WZWorkflowDockWidget(QDockWidget):
         
         separator1 = QFrame()
         separator1.setProperty("class", "separator")
-        separator1.setFrameShape(QFrame.HLine)
+        separator1.setFrameShape(QFrame.Shape.HLine)
         main_layout.addWidget(separator1)
         
         navigation_group = QGroupBox("Nawigacja")
@@ -3493,7 +3995,7 @@ class WZWorkflowDockWidget(QDockWidget):
         
         separator_nav = QFrame()
         separator_nav.setProperty("class", "separator")
-        separator_nav.setFrameShape(QFrame.HLine)
+        separator_nav.setFrameShape(QFrame.Shape.HLine)
         main_layout.addWidget(separator_nav)
         
         messages_group = QGroupBox("Komunikaty systemowe")
@@ -3510,7 +4012,7 @@ class WZWorkflowDockWidget(QDockWidget):
         
         separator2 = QFrame()
         separator2.setProperty("class", "separator")
-        separator2.setFrameShape(QFrame.HLine)
+        separator2.setFrameShape(QFrame.Shape.HLine)
         main_layout.addWidget(separator2)
         
         actions_group = QGroupBox("Akcje")
@@ -3524,7 +4026,7 @@ class WZWorkflowDockWidget(QDockWidget):
         
         actions_layout.addWidget(self.button_container)
         
-        spacer = QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding)
+        spacer = QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
         actions_layout.addItem(spacer)
         
         actions_group.setLayout(actions_layout)
@@ -3592,9 +4094,9 @@ class WZWorkflowDockWidget(QDockWidget):
                     f"Czy na pewno chcesz przeskoczyć do kroku {selected_step}?\n"
                     f"Aktualny krok: {self.current_step}\n\n"
                     "To może spowodować problemy jeśli poprzednie kroki nie zostały ukończone.",
-                    QMessageBox.Yes | QMessageBox.No
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
                 )
-                if reply == QMessageBox.No:
+                if reply == QMessageBox.StandardButton.No:
                     self.step_selector.setCurrentIndex(self.current_step)
                     return
             
@@ -3984,12 +4486,12 @@ class WZWorkflowDockWidget(QDockWidget):
             
             # Tryb niemodalny - QGIS, mapa i inne narzędzia pozostają aktywne
             self.dane_dialog.setModal(False)
-            self.dane_dialog.setWindowModality(Qt.NonModal)
+            self.dane_dialog.setWindowModality(Qt.WindowModality.NonModal)
             self.dane_dialog.setWindowFlags(
-                Qt.Window
-                | Qt.WindowMinimizeButtonHint
-                | Qt.WindowMaximizeButtonHint
-                | Qt.WindowCloseButtonHint
+                Qt.WindowType.Window
+                | Qt.WindowType.WindowMinimizeButtonHint
+                | Qt.WindowType.WindowMaximizeButtonHint
+                | Qt.WindowType.WindowCloseButtonHint
             )
             
             # Sygnały zamiast exec_() - asynchroniczna obsługa wyniku
@@ -4041,7 +4543,7 @@ class WZWorkflowDockWidget(QDockWidget):
         self.add_message("🎉 WORKFLOW ZAKOŃCZONY POMYŚLNIE! 🎉", "success")
         
         completion_label = QLabel("✅ Analiza zakończona!")
-        completion_label.setAlignment(Qt.AlignCenter)
+        completion_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.button_layout.addWidget(completion_label)
     
     def save_checkpoint(self, step_name):
@@ -4062,10 +4564,10 @@ class WZWorkflowDockWidget(QDockWidget):
             None,
             "Potwierdzenie resetu",
             "Czy na pewno chcesz zresetować workflow?",
-            QMessageBox.Yes | QMessageBox.No
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         
-        if reply == QMessageBox.Yes:
+        if reply == QMessageBox.StandardButton.Yes:
             if os.path.exists(CHECKPOINT_FILE):
                 os.remove(CHECKPOINT_FILE)
             
@@ -4082,11 +4584,13 @@ class WZWorkflowDockWidget(QDockWidget):
             return False
         
         try:
-            with open(script_path, 'r', encoding='utf-8') as f:
-                script_content = f.read()
-            
-            exec(script_content, globals())
-            
+            # Uruchomienie skryptu kroku standardowym mechanizmem biblioteki
+            # standardowej (runpy) zamiast exec(). runpy.run_path wykonuje plik
+            # w SWIEZEJ przestrzeni nazw, zainicjowanej globalsami wtyczki —
+            # skrypt widzi to samo co dotad, ale nie zasmieca globalsow wtyczki
+            # i nie uzywa niebezpiecznej wbudowanej funkcji exec.
+            runpy.run_path(script_path, init_globals=globals())
+
             self.add_message(f"✅ {script_name} wykonany", "success")
             return True
             
@@ -4207,7 +4711,7 @@ class WZWorkflowDockWidget(QDockWidget):
         )
         
         # Dodaj do QGIS jako dock widget
-        iface.addDockWidget(Qt.RightDockWidgetArea, self.selection_dock)
+        iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.selection_dock)
         self.selection_dock.show()
         
         self.add_message("📍 Wybierz obiekt na mapie", "info")
@@ -4314,7 +4818,7 @@ def create_wz_workflow_dock():
             raise Exception("iface nie jest dostępne")
         
         dock_widget = WZWorkflowDockWidget()
-        iface.addDockWidget(Qt.RightDockWidgetArea, dock_widget)
+        iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock_widget)
         dock_widget.show()
         
         print("✅ WZ Workflow dock widget utworzony")

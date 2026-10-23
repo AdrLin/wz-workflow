@@ -1,17 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import pandas as pd
-import numpy as np
 import processing
 import os
-from qgis.core import (QgsProject, QgsField, QgsVectorLayer, QgsFields, QgsPointXY, QgsFeature, QgsGeometry)
-from PyQt5.QtCore import QVariant
+import math
 import warnings
 warnings.filterwarnings('ignore')
-import joblib
-import math
+from qgis.core import (QgsProject, QgsField, QgsVectorLayer, QgsFields, QgsPointXY, QgsFeature, QgsGeometry)
+from qgis.PyQt.QtCore import QVariant
 from qgis.core import QgsVectorFileWriter, QgsCoordinateTransformContext
+
+# Ciezkie biblioteki naukowe wymagane przez klasyfikator PBC.
+# Jesli ktorejs brak (albo srodowisko ma niespojne numpy/scipy), zglaszamy
+# czytelny komunikat zamiast surowego bledu importu w polowie przetwarzania.
+try:
+    import numpy as np
+    import pandas as pd
+    import joblib
+except ImportError as _exc:
+    raise ImportError(
+        "Klasyfikacja PBC wymaga bibliotek: numpy, pandas, joblib (oraz "
+        "scikit-learn i scipy dla samego modelu).\\n"
+        "Zainstaluj je w srodowisku Pythona QGIS, np.:\\n"
+        "    python3 -m pip install numpy pandas scipy scikit-learn joblib\\n\\n"
+        f"Szczegoly: {_exc}"
+    ) from _exc
 
 # Wyłącz ostrzeżenia XCB
 os.environ['QT_LOGGING_RULES'] = 'qt.qpa.xcb.warning=false'
@@ -456,7 +469,7 @@ def wczytaj_heksagony_do_qgis(csv_path, nazwa_warstwy, hex_size=HEX_SIZE, crs=pr
         layer, gpkg_path, QgsCoordinateTransformContext(),
         QgsVectorFileWriter.SaveVectorOptions()
     )
-    if error[0] == QgsVectorFileWriter.NoError:
+    if error[0] == QgsVectorFileWriter.WriterError.NoError:
         print(f"  💾 Zapisano: {gpkg_path}")
     else:
         print(f"  ⚠️ Błąd zapisu GPKG: {error}")

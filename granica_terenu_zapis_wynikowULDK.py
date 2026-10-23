@@ -4,8 +4,8 @@ from qgis.core import (QgsProject, QgsVectorFileWriter, QgsCoordinateTransformCo
                        QgsCoordinateTransform, QgsGeometry)
 import os
 from qgis.utils import iface
-from PyQt5.QtWidgets import QMessageBox, QFileDialog
-from PyQt5.QtCore import QVariant
+from qgis.PyQt.QtWidgets import QMessageBox, QFileDialog
+from qgis.PyQt.QtCore import QVariant
 SCRIPTS_PATH = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -382,7 +382,7 @@ if temp_layer:
         result = (QgsVectorFileWriter.WriterError, str(e))
     
     # Sprawdź wynik zapisu
-    if result[0] == QgsVectorFileWriter.NoError:
+    if result[0] == QgsVectorFileWriter.WriterError.NoError:
         print(f"Warstwa została pomyślnie zapisana do: {output_path}")
         
         # Usuń starą warstwę z projektu (jeśli istnieje)

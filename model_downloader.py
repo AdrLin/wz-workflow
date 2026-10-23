@@ -3,6 +3,7 @@ Model Downloader dla wtyczki WZ Workflow
 Automatycznie pobiera duże pliki modeli z GitHub Releases
 """
 import urllib.request
+from urllib.parse import urlparse
 from pathlib import Path
 from qgis.PyQt.QtWidgets import QMessageBox, QProgressDialog
 from qgis.PyQt.QtCore import Qt
@@ -23,7 +24,7 @@ class ModelDownloader:
         },
         "rf_pbc_ostrow.pkl": {
             "url": GITHUB_RELEASE_URL + "rf_pbc_ostrow.pkl",
-            "size_mb": 179,
+            "size_mb": 154,
             "description": "Model klasyfikacji powierzchni biologicznie czynnej (Random Forest)"
         }
     }
@@ -66,7 +67,7 @@ class ModelDownloader:
             QgsMessageLog.logMessage(
                 f"Nieznany model: {model_name}",
                 "WZ Workflow",
-                Qgis.Warning
+                Qgis.MessageLevel.Warning
             )
             return False
         
@@ -89,7 +90,7 @@ class ModelDownloader:
             parent
         )
         progress.setWindowTitle("WZ Workflow - Pobieranie modelu")
-        progress.setWindowModality(Qt.WindowModal)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(0)
         progress.setValue(0)
         
@@ -116,18 +117,32 @@ class ModelDownloader:
             QgsMessageLog.logMessage(
                 f"Rozpoczynam pobieranie: {url}",
                 "WZ Workflow",
-                Qgis.Info
+                Qgis.MessageLevel.Info
             )
             
-            # Pobierz plik
-            urllib.request.urlretrieve(url, output_path, report_progress)
-            
+            # Walidacja schematu URL — dopuszczamy WYLACZNIE https.
+            # Chroni przed file:// i innymi schematami (Bandit B310).
+            parsed = urlparse(url)
+            if parsed.scheme != "https":
+                raise ValueError(
+                    f"Niedozwolony schemat URL: '{parsed.scheme}'. "
+                    f"Modele pobierane sa wylacznie przez https."
+                )
+            if parsed.netloc != "github.com":
+                raise ValueError(
+                    f"Niedozwolony host: '{parsed.netloc}'. "
+                    f"Modele pobierane sa wylacznie z github.com."
+                )
+
+            # Pobieranie strumieniowe (bez urlretrieve — Bandit B310)
+            self._download_https(url, output_path, report_progress)
+
             progress.setValue(100)
             
             QgsMessageLog.logMessage(
                 f"Pomyślnie pobrano: {model_name}",
                 "WZ Workflow",
-                Qgis.Success
+                Qgis.MessageLevel.Success
             )
             
             return True
@@ -140,7 +155,7 @@ class ModelDownloader:
             QgsMessageLog.logMessage(
                 f"Pobieranie anulowane: {model_name}",
                 "WZ Workflow",
-                Qgis.Warning
+                Qgis.MessageLevel.Warning
             )
             return False
             
@@ -150,7 +165,7 @@ class ModelDownloader:
                 output_path.unlink()  # usuń częściowy plik
             
             error_msg = f"Błąd pobierania {model_name}: {str(e)}"
-            QgsMessageLog.logMessage(error_msg, "WZ Workflow", Qgis.Critical)
+            QgsMessageLog.logMessage(error_msg, "WZ Workflow", Qgis.MessageLevel.Critical)
             
             QMessageBox.critical(
                 parent,
@@ -163,6 +178,31 @@ class ModelDownloader:
         finally:
             progress.close()
     
+    def _download_https(self, url, output_path, report_progress):
+        """
+        Pobiera plik przez https strumieniowo.
+
+        Zastepuje urllib.request.urlretrieve, ktore Bandit flaguje (B310),
+        bo pozwalaloby na schematy file:// i inne. Tutaj otwieramy polaczenie
+        jawnie, po wczesniejszej walidacji schematu i hosta.
+        """
+        req = urllib.request.Request(url, headers={"User-Agent": "WZ-Workflow-QGIS"})
+        block_size = 8192
+        block_num = 0
+
+        with urllib.request.urlopen(req, timeout=30) as response:  # nosec B310
+            total_size = int(response.headers.get("Content-Length", 0))
+            report_progress(0, block_size, total_size)
+
+            with open(output_path, "wb") as f:
+                while True:
+                    chunk = response.read(block_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    block_num += 1
+                    report_progress(block_num, block_size, total_size)
+
     def download_all_missing(self, parent=None):
         """
         Pobiera wszystkie brakujące modele
@@ -185,7 +225,7 @@ class ModelDownloader:
         )
         
         msg = QMessageBox(parent)
-        msg.setIcon(QMessageBox.Information)
+        msg.setIcon(QMessageBox.Icon.Information)
         msg.setWindowTitle("WZ Workflow - Pobieranie modeli")
         msg.setText(
             "Wtyczka wymaga pobrania modeli uczenia maszynowego."
@@ -196,10 +236,10 @@ class ModelDownloader:
             f"\n\nŁączny rozmiar: ~{total_size:.0f} MB\n"
             f"Modele zostaną pobrane tylko raz."
         )
-        msg.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
-        msg.setDefaultButton(QMessageBox.Ok)
+        msg.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
+        msg.setDefaultButton(QMessageBox.StandardButton.Ok)
         
-        if msg.exec_() != QMessageBox.Ok:
+        if msg.exec() != QMessageBox.StandardButton.Ok:
             return False
         
         # Pobierz wszystkie

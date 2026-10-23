@@ -79,7 +79,7 @@ def create_line_layers_gpkg():
                 options
             )
             
-            if error[0] == QgsVectorFileWriter.NoError:
+            if error[0] == QgsVectorFileWriter.WriterError.NoError:
                 # Wczytanie warstwy z pliku GPKG
                 layer = QgsVectorLayer(gpkg_path, name, "ogr")
                 
